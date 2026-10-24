@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Procedural Music</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="toolbar">
+    <div class="group">
+      <span class="brand">Procedural Music</span>
+      <button id="btn-new" title="New patch (Ctrl+N)">New</button>
+      <button id="btn-open" title="Open patch (Ctrl+O)">Open</button>
+      <button id="btn-save" title="Save patch (Ctrl+S)">Save</button>
+      <div class="menu-wrap">
+        <button id="btn-examples">Examples ▾</button>
+        <div id="examples-menu" class="dropdown" hidden></div>
+      </div>
+    </div>
+    <div class="group transport">
+      <button id="btn-play" class="play" title="Play / stop (Space)"><span class="icon">▶</span><span class="label">Play</span></button>
+      <label class="bpm">BPM <input id="bpm" type="number" min="20" max="400" step="1" value="110"></label>
+      <span id="position" class="position">1.1</span>
+    </div>
+    <div class="group">
+      <label class="clock" title="Send MIDI clock and start/stop to this port">Clock
+        <select id="clock-port"><option value="">Off</option></select>
+      </label>
+      <button id="btn-ports" title="Look for MIDI ports again">Refresh ports</button>
+    </div>
+  </header>
+
+  <main id="canvas" tabindex="0">
+    <div id="world">
+      <svg id="wires" width="1" height="1"></svg>
+      <div id="nodes"></div>
+    </div>
+    <div id="empty-hint" hidden>
+      <p>Double-click anywhere to add a node, or open an example from the toolbar.</p>
+    </div>
+  </main>
+
+  <footer id="statusbar">
+    <span id="file-name">Untitled</span>
+    <span id="status-msg"></span>
+    <span class="hint">Double-click: add node · Drag output → input: connect · Del: remove · Wheel: zoom · Drag background: pan</span>
+  </footer>
+
+  <div id="add-menu" hidden>
+    <input id="add-search" type="text" placeholder="Search nodes…" autocomplete="off" spellcheck="false">
+    <div id="add-list"></div>
+  </div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

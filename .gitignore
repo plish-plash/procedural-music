@@ -1,2 +1,4 @@
-/target
+target/
 *.mid
+build-log.txt
+app/gen/

@@ -1,0 +1,191 @@
+//! Node and port descriptions shared with the UI.
+
+use std::collections::HashMap;
+
+/// Wire types. Colors and shapes are chosen by the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PortType {
+    Scale,
+    Chord,
+    Rhythm,
+    Notes,
+}
+
+impl PortType {
+    pub fn name(self) -> &'static str {
+        match self {
+            PortType::Scale => "scale",
+            PortType::Chord => "chord",
+            PortType::Rhythm => "rhythm",
+            PortType::Notes => "notes",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<PortType> {
+        Some(match name {
+            "scale" => PortType::Scale,
+            "chord" => PortType::Chord,
+            "rhythm" => PortType::Rhythm,
+            "notes" => PortType::Notes,
+            _ => return None,
+        })
+    }
+
+    /// Whether an output of this type may feed an input of type `to`.
+    pub fn connects_to(self, to: PortType) -> bool {
+        self == to || (self == PortType::Chord && to == PortType::Scale)
+    }
+
+    pub fn all() -> [PortType; 4] {
+        [
+            PortType::Scale,
+            PortType::Chord,
+            PortType::Rhythm,
+            PortType::Notes,
+        ]
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PortSpec {
+    pub name: &'static str,
+    pub ty: PortType,
+    /// Inputs only: whether the node works without it.
+    pub optional: bool,
+}
+
+pub const fn port(name: &'static str, ty: PortType) -> PortSpec {
+    PortSpec {
+        name,
+        ty,
+        optional: false,
+    }
+}
+
+pub const fn optional(name: &'static str, ty: PortType) -> PortSpec {
+    PortSpec {
+        name,
+        ty,
+        optional: true,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ParamKind {
+    Number {
+        min: f64,
+        max: f64,
+        step: f64,
+        default: f64,
+    },
+    Text {
+        default: &'static str,
+    },
+    Choice {
+        options: &'static [&'static str],
+        default: &'static str,
+    },
+    Bool {
+        default: bool,
+    },
+    /// A MIDI output port name, chosen from the ports the app finds.
+    MidiPort,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParamSpec {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub kind: ParamKind,
+}
+
+impl ParamSpec {
+    pub fn default_value(&self) -> ParamValue {
+        match self.kind {
+            ParamKind::Number { default, .. } => ParamValue::Number(default),
+            ParamKind::Text { default } => ParamValue::Text(default.to_string()),
+            ParamKind::Choice { default, .. } => ParamValue::Text(default.to_string()),
+            ParamKind::Bool { default } => ParamValue::Bool(default),
+            ParamKind::MidiPort => ParamValue::Text(String::new()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParamValue {
+    Number(f64),
+    Text(String),
+    Bool(bool),
+}
+
+#[derive(Debug)]
+pub struct NodeSpec {
+    pub kind: &'static str,
+    pub title: &'static str,
+    pub category: &'static str,
+    pub help: &'static str,
+    pub inputs: &'static [PortSpec],
+    pub outputs: &'static [PortSpec],
+    pub params: &'static [ParamSpec],
+}
+
+/// Parameter values for one node, read with defaults from its spec.
+pub struct Params<'a> {
+    spec: &'static NodeSpec,
+    values: &'a HashMap<String, ParamValue>,
+}
+
+impl<'a> Params<'a> {
+    pub fn new(spec: &'static NodeSpec, values: &'a HashMap<String, ParamValue>) -> Self {
+        Params { spec, values }
+    }
+
+    fn get(&self, name: &str) -> ParamValue {
+        let spec = self
+            .spec
+            .params
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap_or_else(|| panic!("node {} has no param {name}", self.spec.kind));
+        match (self.values.get(name), spec.kind) {
+            (Some(ParamValue::Number(n)), ParamKind::Number { min, max, .. }) => {
+                ParamValue::Number(n.clamp(min, max))
+            }
+            (Some(v @ ParamValue::Number(_)), _) => v.clone(),
+            (Some(v @ ParamValue::Text(_)), ParamKind::Text { .. } | ParamKind::MidiPort) => {
+                v.clone()
+            }
+            (Some(ParamValue::Text(t)), ParamKind::Choice { options, default }) => {
+                ParamValue::Text(if options.contains(&t.as_str()) {
+                    t.clone()
+                } else {
+                    default.to_string()
+                })
+            }
+            (Some(v @ ParamValue::Bool(_)), ParamKind::Bool { .. }) => v.clone(),
+            _ => spec.default_value(),
+        }
+    }
+
+    pub fn number(&self, name: &str) -> f64 {
+        match self.get(name) {
+            ParamValue::Number(n) => n,
+            _ => 0.0,
+        }
+    }
+
+    pub fn int(&self, name: &str) -> i32 {
+        self.number(name).round() as i32
+    }
+
+    pub fn text(&self, name: &str) -> String {
+        match self.get(name) {
+            ParamValue::Text(t) => t,
+            _ => String::new(),
+        }
+    }
+
+    pub fn flag(&self, name: &str) -> bool {
+        matches!(self.get(name), ParamValue::Bool(true))
+    }
+}

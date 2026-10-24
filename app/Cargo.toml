@@ -1,0 +1,29 @@
+[package]
+name = "pm-app"
+description = "Procedural Music: desktop node-graph app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "procedural-music"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `custom-protocol` serves the UI from the files embedded in the binary, so a plain
+# `cargo run` works without the Tauri CLI or a dev server.
+tauri = { version = "2", features = ["custom-protocol"] }
+midir = "0.10"
+rfd = "0.15"
+pm-engine = { path = "../crates/engine" }
+
+# The app is its own workspace so the engine crates still build and test without
+# downloading Tauri. Build it with: cargo build --manifest-path app/Cargo.toml
+
+[workspace]
+
+[profile.release]
+lto = true
