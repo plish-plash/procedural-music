@@ -1,0 +1,13 @@
+[package]
+name = "pm-cli"
+description = "Command-line demo for the procedural music theory core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pm"
+path = "src/main.rs"
+
+[dependencies]
+pm-theory = { path = "../theory" }
