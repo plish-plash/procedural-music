@@ -18,7 +18,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["custom-protocol"] }
 midir = "0.10"
 rfd = "0.15"
+cpal = "0.15"
 pm-engine = { path = "../crates/engine" }
+pm-synth = { path = "../crates/synth" }
 
 # The app is its own workspace so the engine crates still build and test without
 # downloading Tauri. Build it with: cargo build --manifest-path app/Cargo.toml
@@ -27,3 +29,13 @@ pm-engine = { path = "../crates/engine" }
 
 [profile.release]
 lto = true
+
+# Audio code must keep up in real time even in debug builds.
+[profile.dev.package.pm-synth]
+opt-level = 3
+
+[profile.dev.package.pm-engine]
+opt-level = 2
+
+[profile.dev.package.pm-theory]
+opt-level = 2

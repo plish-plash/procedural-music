@@ -16,6 +16,7 @@
   --t-chord: #f5b446;
   --t-rhythm: #ff7aa8;
   --t-notes: #6e96ff;
+  --t-audio: #b8e06a;
 
   /* Node categories */
   --c-theory: #2a9d8f;
@@ -25,6 +26,8 @@
   --c-parts: #7a63c9;
   --c-notes: #4f8aa8;
   --c-output: #5c6575;
+  --c-sound: #3f8f5a;
+  --c-effects: #8a6b3f;
 
   --mono: "Cascadia Mono", "Consolas", "SFMono-Regular", Menlo, monospace;
   --sans: "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -156,6 +159,8 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 .node[data-cat=Parts] { --cat: var(--c-parts); }
 .node[data-cat=Notes] { --cat: var(--c-notes); }
 .node[data-cat=Output] { --cat: var(--c-output); }
+.node[data-cat=Sound] { --cat: var(--c-sound); }
+.node[data-cat=Effects] { --cat: var(--c-effects); }
 
 .node-ports { display: flex; justify-content: space-between; padding: 6px 0 2px; gap: 8px; }
 .node-ports .col { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
@@ -174,6 +179,10 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 .port[data-type=chord] { --pt: var(--t-chord); }
 .port[data-type=rhythm] { --pt: var(--t-rhythm); }
 .port[data-type=notes] { --pt: var(--t-notes); }
+.port[data-type=audio] { --pt: var(--t-audio); }
+/* Signal-layer ports are triangles. */
+.port[data-type=audio] .dot { border: 0; border-radius: 0; background: var(--pt); clip-path: polygon(0 0, 100% 50%, 0 100%); width: 12px; height: 13px; }
+.port.in[data-type=audio]:not(.connected) .dot { opacity: 0.45; }
 .port.optional .label::after { content: " (opt.)"; color: var(--text-3); }
 .port.target .dot { transform: scale(1.35); box-shadow: 0 0 0 3px rgba(255,255,255,0.15); }
 .port.dim { opacity: 0.35; }
@@ -224,3 +233,5 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 #status-msg { color: #ffb4b4; overflow: hidden; text-overflow: ellipsis; }
 #status-msg.ok { color: var(--text-2); }
 #statusbar .hint { margin-left: auto; }
+#audio-status { color: var(--text-2); }
+#audio-status.error { color: #ffb4b4; }

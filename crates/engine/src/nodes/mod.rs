@@ -4,11 +4,14 @@ mod melody;
 mod note_ops;
 mod output;
 mod rhythm;
+mod sound;
 mod theory;
 
 use std::collections::HashMap;
 
 use pm_theory::{Chord, Note, Rhythm, Scale, Ticks, PPQ};
+
+use pm_synth::ModuleKind;
 
 use crate::graph::EvalContext;
 use crate::spec::{NodeSpec, ParamValue, Params};
@@ -20,8 +23,8 @@ pub trait NodeImpl: Send + Sync {
     /// One entry per output port. `None` means "nothing to send".
     fn eval(&self, inputs: &Inputs, ctx: &EvalContext) -> Result<Vec<Option<Value>>, String>;
 
-    /// For output nodes: where the notes go (port name, zero-based channel), or `None` if muted.
-    fn sink(&self) -> Option<(String, u8)> {
+    /// For nodes that consume notes: where they go, or `None` if muted.
+    fn sink(&self) -> Option<Sink> {
         None
     }
 
@@ -33,6 +36,20 @@ pub trait NodeImpl: Send + Sync {
     fn program(&self) -> Option<(String, u8, u8)> {
         None
     }
+
+    /// For sound nodes: the module this node becomes in the audio rack.
+    fn module(&self) -> Option<ModuleKind> {
+        None
+    }
+}
+
+/// Where a sink node sends its notes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Sink {
+    /// A MIDI port (empty = default) and zero-based channel.
+    Midi { port: String, channel: u8 },
+    /// The node's own instrument in the audio rack.
+    Instrument,
 }
 
 /// Input values for one evaluation, already converted to each port's type.
@@ -99,7 +116,18 @@ static SPECS: &[&NodeSpec] = &[
     &note_ops::QUANTIZE,
     &note_ops::VELOCITY,
     &note_ops::MERGE,
+    // Built-in sound
+    &sound::POLY_SYNTH,
+    &sound::MONO_SYNTH,
+    &sound::DRUM_SYNTH,
+    &sound::MIXER,
+    &sound::FX_FILTER,
+    &sound::FX_DRIVE,
+    &sound::FX_CHORUS,
+    &sound::FX_DELAY,
+    &sound::FX_REVERB,
     // Output
+    &sound::AUDIO_OUT,
     &output::MIDI_OUT,
 ];
 
@@ -143,6 +171,8 @@ pub fn build(
         "velocity" => note_ops::build_velocity(&p),
         "merge" => note_ops::build_merge(&p),
         "midi_out" => output::build_midi_out(&p),
+        "poly_synth" | "mono_synth" | "drum_synth" | "mixer" | "fx_filter" | "fx_drive"
+        | "fx_chorus" | "fx_delay" | "fx_reverb" | "audio_out" => sound::build(spec.kind, &p),
         other => Err(format!("unknown node kind '{other}'")),
     }
 }

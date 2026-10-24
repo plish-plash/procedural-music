@@ -13,8 +13,13 @@ dependencies = [
 name = "pm-engine"
 version = "0.1.0"
 dependencies = [
+ "pm-synth",
  "pm-theory",
 ]
+
+[[package]]
+name = "pm-synth"
+version = "0.1.0"
 
 [[package]]
 name = "pm-theory"

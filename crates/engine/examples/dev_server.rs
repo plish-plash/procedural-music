@@ -42,7 +42,25 @@ fn main() {
     let s = state.clone();
     std::thread::spawn(move || loop {
         let now = s.start.elapsed().as_secs_f64();
-        let sent = s.engine.lock().unwrap().poll(now);
+        let sent = {
+            let mut engine = s.engine.lock().unwrap();
+            let sent = engine.poll(now);
+            // Instrument notes would go to the audio thread; count them as sent.
+            let instrument_ons: usize = engine
+                .take_audio()
+                .iter()
+                .map(|m| match m {
+                    pm_synth::AudioMsg::Events(e) => e
+                        .iter()
+                        .filter(|e| matches!(e.event, pm_synth::NoteEvent::On { .. }))
+                        .count(),
+                    _ => 0,
+                })
+                .sum();
+            s.notes_sent
+                .fetch_add(instrument_ons as u64, Ordering::Relaxed);
+            sent
+        };
         let ons = sent.iter().filter(|m| m.bytes[0] & 0xf0 == 0x90).count() as u64;
         s.notes_sent.fetch_add(ons, Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(2));
@@ -87,6 +105,17 @@ fn serve(mut stream: TcpStream, state: &State) -> std::io::Result<()> {
         let reply = match command {
             "midi_ports" => Ok(Json::Arr(vec![Json::str("Dev server (no MIDI)")])),
             "notes_sent" => Ok(Json::Num(state.notes_sent.load(Ordering::Relaxed) as f64)),
+            "export_wav" => {
+                let bars = args.get("bars").and_then(Json::as_f64).unwrap_or(8.0) as u32;
+                let (doc, bpm) = {
+                    let engine = state.engine.lock().unwrap();
+                    (engine.doc().clone(), engine.bpm())
+                };
+                let audio = pm_engine::offline::render(&doc, bpm, bars, 2.0, 48_000, 1);
+                std::fs::write("export.wav", pm_synth::wav::encode_stereo(&audio, 48_000))
+                    .map(|_| Json::str("export.wav"))
+                    .map_err(|e| e.to_string())
+            }
             _ => {
                 let now = state.start.elapsed().as_secs_f64();
                 let salt = SystemTime::now()

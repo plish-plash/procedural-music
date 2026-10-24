@@ -141,6 +141,12 @@ pub fn specs_json() -> Json {
                             ("step", Json::Num(step)),
                             ("default", Json::Num(default)),
                         ]),
+                        ParamKind::LogNumber { min, max, default } => f.extend([
+                            ("kind", Json::str("log")),
+                            ("min", Json::Num(min)),
+                            ("max", Json::Num(max)),
+                            ("default", Json::Num(default)),
+                        ]),
                         ParamKind::Text { default } => {
                             f.extend([("kind", Json::str("text")), ("default", Json::str(default))])
                         }

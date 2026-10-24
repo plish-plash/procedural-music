@@ -25,7 +25,7 @@ function svg(tag, attrs = {}) {
   return e;
 }
 
-const TYPE_COLOR = { scale: '#40d2be', chord: '#f5b446', rhythm: '#ff7aa8', notes: '#6e96ff' };
+const TYPE_COLOR = { scale: '#40d2be', chord: '#f5b446', rhythm: '#ff7aa8', notes: '#6e96ff', audio: '#b8e06a' };
 
 export class Editor {
   constructor({ canvas, world, nodesEl, wiresEl, addMenu, addSearch, addList, emptyHint, specs, onChange }) {
@@ -215,6 +215,20 @@ export class Editor {
           control = el('input', { type: 'number', min: p.min, max: p.max, step: p.step, value });
           control.addEventListener('change', () => set(Number(control.value)));
         }
+        break;
+      }
+      case 'log': {
+        // Slider position 0..1000 maps exponentially onto min..max.
+        const toPos = (v) => Math.round((1000 * Math.log(v / p.min)) / Math.log(p.max / p.min));
+        const fromPos = (x) => round3(p.min * Math.pow(p.max / p.min, x / 1000));
+        const out = el('output', {}, fmtLog(value));
+        const range = el('input', { type: 'range', min: 0, max: 1000, step: 1, value: toPos(value) });
+        range.addEventListener('input', () => {
+          const v = fromPos(Number(range.value));
+          out.textContent = fmtLog(v);
+          set(v);
+        });
+        control = el('div', { class: 'slider' }, range, out);
         break;
       }
       case 'text': {
@@ -670,4 +684,15 @@ export function isTyping(e) {
 
 function fmt(v) {
   return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
+}
+
+/** Three significant figures. */
+function round3(v) {
+  const m = Math.pow(10, Math.max(0, 2 - Math.floor(Math.log10(Math.abs(v) || 1))));
+  return Math.round(v * m) / m;
+}
+
+function fmtLog(v) {
+  if (v >= 1000) return `${round3(v / 1000)}k`;
+  return String(round3(v));
 }

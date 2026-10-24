@@ -9,6 +9,8 @@ pub enum PortType {
     Chord,
     Rhythm,
     Notes,
+    /// A stereo audio stream inside the built-in sound engine.
+    Audio,
 }
 
 impl PortType {
@@ -18,6 +20,7 @@ impl PortType {
             PortType::Chord => "chord",
             PortType::Rhythm => "rhythm",
             PortType::Notes => "notes",
+            PortType::Audio => "audio",
         }
     }
 
@@ -27,6 +30,7 @@ impl PortType {
             "chord" => PortType::Chord,
             "rhythm" => PortType::Rhythm,
             "notes" => PortType::Notes,
+            "audio" => PortType::Audio,
             _ => return None,
         })
     }
@@ -36,12 +40,13 @@ impl PortType {
         self == to || (self == PortType::Chord && to == PortType::Scale)
     }
 
-    pub fn all() -> [PortType; 4] {
+    pub fn all() -> [PortType; 5] {
         [
             PortType::Scale,
             PortType::Chord,
             PortType::Rhythm,
             PortType::Notes,
+            PortType::Audio,
         ]
     }
 }
@@ -78,6 +83,12 @@ pub enum ParamKind {
         step: f64,
         default: f64,
     },
+    /// A number shown on a logarithmic slider (frequencies, times). `min` must be > 0.
+    LogNumber {
+        min: f64,
+        max: f64,
+        default: f64,
+    },
     Text {
         default: &'static str,
     },
@@ -102,7 +113,9 @@ pub struct ParamSpec {
 impl ParamSpec {
     pub fn default_value(&self) -> ParamValue {
         match self.kind {
-            ParamKind::Number { default, .. } => ParamValue::Number(default),
+            ParamKind::Number { default, .. } | ParamKind::LogNumber { default, .. } => {
+                ParamValue::Number(default)
+            }
             ParamKind::Text { default } => ParamValue::Text(default.to_string()),
             ParamKind::Choice { default, .. } => ParamValue::Text(default.to_string()),
             ParamKind::Bool { default } => ParamValue::Bool(default),
@@ -148,9 +161,10 @@ impl<'a> Params<'a> {
             .find(|p| p.name == name)
             .unwrap_or_else(|| panic!("node {} has no param {name}", self.spec.kind));
         match (self.values.get(name), spec.kind) {
-            (Some(ParamValue::Number(n)), ParamKind::Number { min, max, .. }) => {
-                ParamValue::Number(n.clamp(min, max))
-            }
+            (
+                Some(ParamValue::Number(n)),
+                ParamKind::Number { min, max, .. } | ParamKind::LogNumber { min, max, .. },
+            ) => ParamValue::Number(n.clamp(min, max)),
             (Some(v @ ParamValue::Number(_)), _) => v.clone(),
             (Some(v @ ParamValue::Text(_)), ParamKind::Text { .. } | ParamKind::MidiPort) => {
                 v.clone()

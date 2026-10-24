@@ -1,4 +1,5 @@
 target/
 *.mid
+*.wav
 build-log.txt
 app/gen/

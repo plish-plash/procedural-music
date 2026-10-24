@@ -1,6 +1,6 @@
 //! Output nodes.
 
-use super::{Inputs, NodeImpl};
+use super::{Inputs, NodeImpl, Sink};
 use crate::graph::EvalContext;
 use crate::spec::{port, NodeSpec, ParamKind, ParamSpec, Params, PortType};
 use crate::value::Value;
@@ -38,8 +38,11 @@ impl NodeImpl for MidiOut {
         Ok(Vec::new())
     }
 
-    fn sink(&self) -> Option<(String, u8)> {
-        (!self.mute).then(|| (self.port.clone(), self.channel))
+    fn sink(&self) -> Option<Sink> {
+        (!self.mute).then(|| Sink::Midi {
+            port: self.port.clone(),
+            channel: self.channel,
+        })
     }
 
     fn is_sink(&self) -> bool {

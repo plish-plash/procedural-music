@@ -3,13 +3,17 @@
 //! The engine is driven by the caller's clock: every call takes `now` in seconds
 //! (any monotonic origin). [`Engine::poll`] evaluates the graph a little ahead of
 //! the playhead, queues timed MIDI messages, and returns the ones that are due.
+//! Notes for built-in instruments are handed out early instead (see
+//! [`Engine::take_audio`]), so the audio thread can place them sample-accurately.
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
+use pm_synth::{AudioMsg, NoteEvent, TimedEvent};
 use pm_theory::{Meter, Ticks, PPQ};
 
 use crate::graph::{CompileReport, EvalContext, Graph, GraphDoc};
+use crate::nodes::Sink;
 
 /// Port name meaning "the first MIDI port the app finds".
 pub const DEFAULT_PORT: &str = "";
@@ -93,6 +97,12 @@ pub struct Engine {
     active: HashMap<(String, u8, u8), u32>,
     clock_ports: Vec<String>,
     salt: u64,
+    /// The document the current graph was built from (for offline rendering).
+    doc: GraphDoc,
+    /// Messages for the audio thread, collected until [`Engine::take_audio`].
+    audio: Vec<AudioMsg>,
+    audio_events: Vec<TimedEvent>,
+    next_note_id: u64,
     /// How far ahead of the playhead to schedule, in seconds.
     pub lookahead: f64,
     /// Size of each evaluation window in ticks. Graph edits take effect at the next window.
@@ -120,6 +130,10 @@ impl Engine {
             active: HashMap::new(),
             clock_ports: Vec::new(),
             salt: 0,
+            doc: GraphDoc::default(),
+            audio: vec![AudioMsg::Tempo(110.0)],
+            audio_events: Vec::new(),
+            next_note_id: 1,
             lookahead: 0.12,
             slice: PPQ / 4,
         }
@@ -130,6 +144,8 @@ impl Engine {
     pub fn set_graph(&mut self, doc: &GraphDoc) -> CompileReport {
         let old_programs = self.graph.programs();
         self.graph = Graph::compile(doc);
+        self.doc = doc.clone();
+        self.audio.push(AudioMsg::Rack(self.graph.rack_desc()));
         if self.playing {
             // Apply instrument changes right away (due at the next poll).
             for (port, channel, program) in self.graph.programs() {
@@ -145,6 +161,21 @@ impl Engine {
             }
         }
         self.graph.report(self.meter, 4)
+    }
+
+    /// The document of the current graph.
+    pub fn doc(&self) -> &GraphDoc {
+        &self.doc
+    }
+
+    /// Messages for the audio thread since the last call: rack changes, tempo, instrument
+    /// notes (ahead of time) and stops, in order.
+    pub fn take_audio(&mut self) -> Vec<AudioMsg> {
+        if !self.audio_events.is_empty() {
+            self.audio
+                .push(AudioMsg::Events(std::mem::take(&mut self.audio_events)));
+        }
+        std::mem::take(&mut self.audio)
     }
 
     pub fn meter(&self) -> Meter {
@@ -193,6 +224,7 @@ impl Engine {
             self.anchor_time = now;
         }
         self.bpm = bpm;
+        self.audio.push(AudioMsg::Tempo(bpm));
     }
 
     /// Starts from the top. `salt` should differ every time so unlocked random nodes
@@ -241,6 +273,11 @@ impl Engine {
         if !self.playing && self.active.is_empty() {
             return out;
         }
+        if !self.audio_events.is_empty() {
+            self.audio
+                .push(AudioMsg::Events(std::mem::take(&mut self.audio_events)));
+        }
+        self.audio.push(AudioMsg::Stop);
         self.playing = false;
         self.anchor_tick = 0.0;
         self.queue.clear();
@@ -308,6 +345,35 @@ impl Engine {
             salt: self.salt,
         };
         for sink in self.graph.evaluate(&ctx) {
+            let (port, channel) = match sink.sink {
+                Sink::Midi { port, channel } => (port, channel & 0x0f),
+                Sink::Instrument => {
+                    for note in sink.notes {
+                        let id = self.next_note_id;
+                        self.next_note_id += 1;
+                        let (key, _) = note.pitch.tuning().to_midi(note.pitch.step());
+                        let on = NoteEvent::On {
+                            id,
+                            freq: note.pitch.frequency() as f32,
+                            key: key.clamp(0, 127) as u8,
+                            velocity: note.velocity.clamp(1, 127),
+                        };
+                        let at = self.time_of(note.start);
+                        self.audio_events.push(TimedEvent {
+                            at,
+                            module: sink.module,
+                            event: on,
+                        });
+                        let at = self.time_of(note.end());
+                        self.audio_events.push(TimedEvent {
+                            at,
+                            module: sink.module,
+                            event: NoteEvent::Off { id },
+                        });
+                    }
+                    continue;
+                }
+            };
             for note in sink.notes {
                 let (key, _cents) = note.pitch.tuning().to_midi(note.pitch.step());
                 if !(0..=127).contains(&key) {
@@ -315,7 +381,7 @@ impl Engine {
                 }
                 let key = key as u8;
                 let velocity = note.velocity.clamp(1, 127);
-                let (port, channel) = (sink.port.clone(), sink.channel & 0x0f);
+                let port = port.clone();
                 self.push(
                     self.time_of(note.start),
                     Event::On {

@@ -5,7 +5,9 @@ use std::fmt::Write as _;
 
 use pm_theory::{Chord, Meter, Note, Pitch, Scale, Ticks};
 
-use crate::nodes::{self, Inputs, NodeImpl};
+use pm_synth::{ModuleDesc, RackDesc};
+
+use crate::nodes::{self, Inputs, NodeImpl, Sink};
 use crate::spec::{NodeSpec, ParamValue, PortType};
 use crate::timeline::Timeline;
 use crate::value::Value;
@@ -60,13 +62,22 @@ pub struct CompileReport {
     pub previews: Vec<(String, String)>,
 }
 
-/// Notes leaving the graph through one output node.
+/// Notes leaving the graph through one sink node (MIDI out or a built-in instrument).
 #[derive(Clone, Debug)]
 pub struct SinkOutput {
     pub node: String,
-    pub port: String,
-    pub channel: u8,
+    /// The node's id in the audio rack (see [`module_id`]).
+    pub module: u64,
+    pub sink: Sink,
     pub notes: Vec<Note>,
+}
+
+/// A node's stable id in the audio rack: a hash of its node id, so sound state and
+/// in-flight notes follow the node across edits.
+pub fn module_id(node_id: &str) -> u64 {
+    node_id.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 struct CompiledNode {
@@ -215,6 +226,31 @@ impl Graph {
             .collect()
     }
 
+    /// The sound nodes as an audio rack: instruments, effects, mixers and outputs.
+    pub fn rack_desc(&self) -> RackDesc {
+        let mut modules = Vec::new();
+        for &i in &self.order {
+            let node = &self.nodes[i];
+            let Some(kind) = node.imp.as_ref().and_then(|imp| imp.module()) else {
+                continue;
+            };
+            let inputs = node
+                .spec
+                .inputs
+                .iter()
+                .zip(&node.inputs)
+                .filter(|(spec, _)| spec.ty == PortType::Audio)
+                .map(|(_, slot)| slot.map(|(src, _)| module_id(&self.nodes[src].id)))
+                .collect();
+            modules.push(ModuleDesc {
+                id: module_id(&node.id),
+                kind,
+                inputs,
+            });
+        }
+        RackDesc { modules }
+    }
+
     /// Issues found while compiling.
     pub fn issues(&self) -> &[NodeIssue] {
         &self.issues
@@ -231,6 +267,10 @@ impl Graph {
         for &i in &self.order {
             let node = &self.nodes[i];
             let Some(imp) = &node.imp else { continue };
+            // Effects, mixers and audio outputs only process audio, in the rack.
+            if !imp.is_sink() && node.spec.outputs.iter().all(|o| o.ty == PortType::Audio) {
+                continue;
+            }
             let mut values = Vec::with_capacity(node.inputs.len());
             let mut missing = false;
             for (slot, spec) in node.inputs.iter().zip(node.spec.inputs) {
@@ -245,11 +285,11 @@ impl Graph {
             }
             let inputs = Inputs { values };
             if imp.is_sink() {
-                if let Some((port, channel)) = imp.sink() {
+                if let Some(sink) = imp.sink() {
                     sinks.push(SinkOutput {
                         node: node.id.clone(),
-                        port,
-                        channel,
+                        module: module_id(&node.id),
+                        sink,
                         notes: inputs.notes(0).to_vec(),
                     });
                 }
@@ -297,17 +337,22 @@ impl Graph {
         issues.extend(eval.issues);
         let mut previews = Vec::new();
         for (i, node) in self.nodes.iter().enumerate() {
-            let text = if let Some(sink) = eval.sinks.iter().find(|s| s.node == node.id) {
-                let port = if sink.port.is_empty() {
-                    "Default port"
-                } else {
-                    &sink.port
-                };
-                format!(
-                    "{port} · ch {}\n{}",
-                    sink.channel + 1,
-                    describe_notes(&sink.notes, meter)
-                )
+            let text = if let Some(out) = eval.sinks.iter().find(|s| s.node == node.id) {
+                match &out.sink {
+                    Sink::Midi { port, channel } => {
+                        let port = if port.is_empty() {
+                            "Default port"
+                        } else {
+                            port
+                        };
+                        format!(
+                            "{port} · ch {}\n{}",
+                            channel + 1,
+                            describe_notes(&out.notes, meter)
+                        )
+                    }
+                    Sink::Instrument => describe_notes(&out.notes, meter),
+                }
             } else if let Some(v) = eval.outputs[i].iter().flatten().next() {
                 describe(v, meter)
             } else {
@@ -482,7 +527,13 @@ mod tests {
             salt: 0,
         });
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].channel, 0);
+        assert_eq!(
+            out[0].sink,
+            Sink::Midi {
+                port: String::new(),
+                channel: 0
+            }
+        );
         let notes = &out[0].notes;
         assert_eq!(notes.len(), 16, "four chords of four voices");
         assert!(notes

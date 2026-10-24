@@ -37,6 +37,12 @@ export async function saveProject(contents, path) {
   return 'untitled.pmpatch';
 }
 
+/** Renders `bars` bars through the built-in instruments and asks where to save the WAV. */
+export async function exportWav(bars) {
+  if (tauri) return tauri.invoke('export_wav', { bars });
+  return post('/api/export_wav', { bars });
+}
+
 /** Asks for a file. Resolves to [path, contents], or null if cancelled. */
 export async function openProject() {
   if (tauri) return tauri.invoke('open_project');

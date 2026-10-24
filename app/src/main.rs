@@ -1,8 +1,10 @@
 //! Procedural Music desktop app: hosts the node editor UI, runs the engine on a
-//! scheduler thread and sends its MIDI out.
+//! scheduler thread, plays the built-in instruments through the sound card and sends
+//! MIDI out.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
 mod midi;
 
 use std::sync::{Arc, Mutex};
@@ -16,6 +18,7 @@ use tauri::Manager;
 struct Shared {
     engine: Mutex<Engine>,
     midi: Mutex<midi::Midi>,
+    audio: audio::Audio,
     start: Instant,
 }
 
@@ -33,6 +36,13 @@ impl Shared {
             midi.send(&m.port, &m.bytes);
         }
     }
+
+    /// Forwards rack changes, tempo, notes and stops to the audio thread.
+    fn flush_audio(&self, engine: &mut Engine) {
+        for msg in engine.take_audio() {
+            let _ = self.audio.tx.send(msg);
+        }
+    }
 }
 
 fn salt() -> u64 {
@@ -46,13 +56,24 @@ fn engine(state: tauri::State<'_, Arc<Shared>>, command: String, args: String) -
     let now = state.now();
     let reply = {
         let mut engine = state.engine.lock().unwrap();
-        api::handle(&mut engine, now, salt(), &command, &args)?
+        let reply = api::handle(&mut engine, now, salt(), &command, &args)?;
+        state.flush_audio(&mut engine);
+        reply
     };
     state.send(&reply.midi);
     let mut json = reply.json;
     if command == "status" {
-        if let (Json::Obj(fields), Some(err)) = (&mut json, state.midi.lock().unwrap().last_error.clone()) {
-            fields.push(("midiError".into(), Json::Str(err)));
+        if let Json::Obj(fields) = &mut json {
+            if let Some(err) = state.midi.lock().unwrap().last_error.clone() {
+                fields.push(("midiError".into(), Json::Str(err)));
+            }
+            let audio = state.audio.status.lock().unwrap().clone();
+            if let Some(device) = audio.device {
+                fields.push(("audio".into(), Json::Str(device)));
+            }
+            if let Some(err) = audio.error {
+                fields.push(("audioError".into(), Json::Str(err)));
+            }
         }
     }
     Ok(json.to_string())
@@ -98,20 +119,51 @@ async fn open_project() -> Result<Option<(String, String)>, String> {
     Ok(Some((path.display().to_string(), contents)))
 }
 
+/// Renders `bars` bars of the current patch through the built-in instruments (faster
+/// than real time) and saves a WAV file. Returns the path, or None if cancelled.
+#[tauri::command]
+async fn export_wav(state: tauri::State<'_, Arc<Shared>>, bars: u32) -> Result<Option<String>, String> {
+    let (doc, bpm) = {
+        let engine = state.engine.lock().unwrap();
+        (engine.doc().clone(), engine.bpm())
+    };
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Export WAV")
+        .add_filter("WAV audio", &["wav"])
+        .set_file_name("patch.wav")
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    const RATE: u32 = 48_000;
+    let audio = pm_engine::offline::render(&doc, bpm, bars.clamp(1, 512), 3.0, RATE, salt());
+    std::fs::write(&path, pm_synth::wav::encode_stereo(&audio, RATE))
+        .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
+    Ok(Some(path.display().to_string()))
+}
+
 fn main() {
+    let start = Instant::now();
     let shared = Arc::new(Shared {
         engine: Mutex::new(Engine::new()),
         midi: Mutex::new(midi::Midi::default()),
-        start: Instant::now(),
+        audio: audio::start(start),
+        start,
     });
 
-    // Scheduler: evaluates ahead of the playhead and sends MIDI as it comes due.
+    // Scheduler: evaluates ahead of the playhead, sends MIDI as it comes due and hands
+    // instrument notes to the audio thread early.
     let s = shared.clone();
     std::thread::Builder::new()
         .name("scheduler".into())
         .spawn(move || loop {
             let now = s.now();
-            let due = s.engine.lock().unwrap().poll(now);
+            let due = {
+                let mut engine = s.engine.lock().unwrap();
+                let due = engine.poll(now);
+                s.flush_audio(&mut engine);
+                due
+            };
             s.send(&due);
             std::thread::sleep(Duration::from_millis(1));
         })
@@ -119,12 +171,17 @@ fn main() {
 
     tauri::Builder::default()
         .manage(shared)
-        .invoke_handler(tauri::generate_handler![engine, midi_ports, save_project, open_project])
+        .invoke_handler(tauri::generate_handler![engine, midi_ports, save_project, open_project, export_wav])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 // Release any sounding notes before the app goes away.
                 let shared = window.state::<Arc<Shared>>();
-                let offs = shared.engine.lock().unwrap().stop();
+                let offs = {
+                    let mut engine = shared.engine.lock().unwrap();
+                    let offs = engine.stop();
+                    shared.flush_audio(&mut engine);
+                    offs
+                };
                 shared.send(&offs);
             }
         })

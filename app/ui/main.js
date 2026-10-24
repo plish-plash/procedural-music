@@ -114,6 +114,14 @@ async function pollStatus() {
     showPlaying(s.playing);
     $('position').textContent = `${s.bar}.${s.beat}`;
     if (s.midiError) setStatus(s.midiError);
+    const audio = $('audio-status');
+    if (s.audioError) {
+      audio.textContent = `Audio: ${s.audioError}`;
+      audio.classList.add('error');
+    } else if (s.audio) {
+      audio.textContent = `Audio: ${s.audio}`;
+      audio.classList.remove('error');
+    }
   } catch {
     /* ignore a missed poll */
   } finally {
@@ -133,6 +141,21 @@ async function save(saveAs) {
     setStatus(`Saved ${baseName(path)}`, true);
   } catch (e) {
     setStatus(String(e));
+  }
+}
+
+async function exportWav() {
+  const answer = window.prompt('How many bars to render?', '8');
+  if (answer === null) return;
+  const bars = Math.max(1, Math.min(256, Math.round(Number(answer)) || 8));
+  try {
+    setStatus(`Rendering ${bars} bars…`, true);
+    clearTimeout(pushTimer);
+    await pushGraph();
+    const path = await api.exportWav(bars);
+    setStatus(path ? `Exported ${baseName(path)}` : 'Export cancelled', true);
+  } catch (e) {
+    setStatus(`Export failed: ${e.message ?? e}`);
   }
 }
 
@@ -203,6 +226,7 @@ async function init() {
   $('btn-open').addEventListener('click', open);
   $('btn-save').addEventListener('click', (e) => save(e.shiftKey));
   $('btn-ports').addEventListener('click', refreshPorts);
+  $('btn-export').addEventListener('click', exportWav);
   $('bpm').addEventListener('change', async () => {
     const bpm = Math.min(400, Math.max(20, Number($('bpm').value) || 110));
     $('bpm').value = bpm;

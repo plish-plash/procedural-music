@@ -13,6 +13,7 @@ mod engine;
 mod graph;
 pub mod json;
 mod nodes;
+pub mod offline;
 mod rng;
 mod spec;
 mod timeline;
@@ -20,9 +21,9 @@ mod value;
 
 pub use engine::{Engine, MidiMessage, DEFAULT_PORT};
 pub use graph::{
-    CompileReport, EvalContext, Graph, GraphDoc, NodeDoc, NodeIssue, SinkOutput, WireDoc,
+    module_id, CompileReport, EvalContext, Graph, GraphDoc, NodeDoc, NodeIssue, SinkOutput, WireDoc,
 };
-pub use nodes::{spec_for, specs};
+pub use nodes::{spec_for, specs, Sink};
 pub use spec::{NodeSpec, ParamKind, ParamSpec, ParamValue, PortSpec, PortType};
 pub use timeline::{Segment, Timeline};
 pub use value::Value;
