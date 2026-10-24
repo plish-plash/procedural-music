@@ -102,6 +102,50 @@ export const EXAMPLES = [
     },
   },
   {
+    name: 'First species',
+    description: "Fux's cantus firmus in D Dorian in the bass; the solver writes the soprano. Try other species, or switch rule groups off.",
+    doc: {
+      version: 1,
+      bpm: 150,
+      nodes: [
+        { id: 'n1', type: 'scale', x: 40, y: 40, params: { root: 'D', scale: 'Dorian' } },
+        { id: 'n2', type: 'pattern', x: 40, y: 300, params: { pattern: 'x', step: '1/1' } },
+        { id: 'n3', type: 'sequencer', x: 330, y: 160, params: { degrees: '1 3 2 1 4 3 5 4 3 2 1', octave: 3, gate: 96, velocity: 90 } },
+        { id: 'n4', type: 'counterpoint', x: 640, y: 40, params: { species: '1st: note against note', soprano: 'Free', alto: 'Off', tenor: 'Off', bass: 'Fixed', bars: 11 } },
+        { id: 'n5', type: 'split_voices', x: 1070, y: 40, params: {} },
+        { id: 'n6', type: 'poly_synth', x: 1360, y: 40, params: { ...PLUCK, cutoff: 1400, decay: 900, sustain: 45, release: 500, level: -4 } },
+        { id: 'n7', type: 'poly_synth', x: 1360, y: 560, params: { ...PAD, attack: 60, cutoff: 900, level: -6 } },
+        { id: 'n8', type: 'mixer', x: 1680, y: 300, params: { level_a: 0, pan_a: -15, level_b: 0, pan_b: 15, level_c: 0, pan_c: 0, level_d: 0, pan_d: 0 } },
+        { id: 'n9', type: 'fx_reverb', x: 2000, y: 300, params: { size: 80, damping: 40, mix: 24, width: 100 } },
+        { id: 'n10', type: 'audio_out', x: 2310, y: 300, params: { level: 0 } },
+      ],
+      wires: [
+        wire('n1', 'scale', 'n3', 'scale'), wire('n2', 'rhythm', 'n3', 'rhythm'), wire('n3', 'notes', 'n4', 'fixed'), wire('n1', 'scale', 'n4', 'key'),
+        wire('n4', 'notes', 'n5', 'notes'), wire('n5', 'v1', 'n6', 'notes'), wire('n5', 'v4', 'n7', 'notes'),
+        wire('n6', 'audio', 'n8', 'a'), wire('n7', 'audio', 'n8', 'b'), wire('n8', 'audio', 'n9', 'audio'), wire('n9', 'audio', 'n10', 'audio'),
+      ],
+    },
+  },
+  {
+    name: 'Chorale',
+    description: 'Four voices written over a progression in chorale style: chord tones, smooth lines, no parallels. Hover a note to see why it was chosen.',
+    doc: {
+      version: 1,
+      bpm: 76,
+      nodes: [
+        { id: 'n2', type: 'progression', x: 40, y: 40, params: { chords: 'I IV vi V IV ii V I', notation: 'Roman numerals', key: 'G major', bars: 1, octave: 4 } },
+        { id: 'n3', type: 'counterpoint', x: 380, y: 40, params: { species: '1st: note against note', soprano: 'Free', alto: 'Free', tenor: 'Free', bass: 'Free', bars: 8 } },
+        { id: 'n4', type: 'poly_synth', x: 810, y: 40, params: { ...PAD, attack: 120, release: 900, level: -6 } },
+        { id: 'n5', type: 'fx_reverb', x: 1130, y: 40, params: { size: 85, damping: 35, mix: 30, width: 100 } },
+        { id: 'n6', type: 'audio_out', x: 1440, y: 40, params: { level: 0 } },
+      ],
+      wires: [
+        wire('n2', 'key', 'n3', 'key'), wire('n2', 'chords', 'n3', 'chords'),
+        wire('n3', 'notes', 'n4', 'notes'), wire('n4', 'audio', 'n5', 'audio'), wire('n5', 'audio', 'n6', 'audio'),
+      ],
+    },
+  },
+  {
     name: 'Full band (MIDI)',
     description: 'The Full band patch sent to MIDI ports instead, for external synths (or the Windows GS synth).',
     doc: {

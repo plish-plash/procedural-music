@@ -106,6 +106,7 @@ function showPlaying(isPlaying) {
 }
 
 let polling = false;
+let solveGeneration = null;
 async function pollStatus() {
   if (polling) return;
   polling = true;
@@ -113,6 +114,13 @@ async function pollStatus() {
     const s = await api.call('status');
     showPlaying(s.playing);
     $('position').textContent = `${s.bar}.${s.beat}`;
+    editor.setPlayhead(s.playing ? s.tick : null);
+    if (s.solveGeneration !== undefined && s.solveGeneration !== solveGeneration) {
+      // A background counterpoint solve finished: refresh the piano rolls.
+      const first = solveGeneration === null;
+      solveGeneration = s.solveGeneration;
+      if (!first) editor.setReport(await api.call('report'));
+    }
     if (s.midiError) setStatus(s.midiError);
     const audio = $('audio-status');
     if (s.audioError) {

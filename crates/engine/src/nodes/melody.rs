@@ -477,12 +477,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn ctx(start: Ticks, end: Ticks, salt: u64) -> EvalContext {
-        EvalContext {
-            start,
-            end,
-            meter: Meter::COMMON,
-            salt,
-        }
+        EvalContext::new(start, end, Meter::COMMON, salt)
     }
 
     fn run(

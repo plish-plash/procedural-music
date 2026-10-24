@@ -39,3 +39,7 @@ opt-level = 2
 
 [profile.dev.package.pm-theory]
 opt-level = 2
+
+# The counterpoint solver searches thousands of lines; unoptimized it is ~20x slower.
+[profile.dev.package.pm-counterpoint]
+opt-level = 3

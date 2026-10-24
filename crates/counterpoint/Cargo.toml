@@ -1,0 +1,9 @@
+[package]
+name = "pm-counterpoint"
+description = "Rule-based counterpoint and voice-leading solver for the procedural music app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pm-theory = { path = "../theory" }

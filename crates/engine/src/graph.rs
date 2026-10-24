@@ -7,6 +7,7 @@ use pm_theory::{Chord, Meter, Note, Pitch, Scale, Ticks};
 
 use pm_synth::{ModuleDesc, RackDesc};
 
+use crate::json::Json;
 use crate::nodes::{self, Inputs, NodeImpl, Sink};
 use crate::spec::{NodeSpec, ParamValue, PortType};
 use crate::timeline::Timeline;
@@ -45,6 +46,25 @@ pub struct EvalContext {
     pub meter: Meter,
     /// Changes every time playback starts; unlocked random nodes mix it in.
     pub salt: u64,
+    /// True when evaluating for the editor's previews (display-only nodes run).
+    pub preview: bool,
+    /// True when slow work must finish now (offline rendering, tests) rather than
+    /// continue in the background.
+    pub sync: bool,
+}
+
+impl EvalContext {
+    /// A live-playback context.
+    pub fn new(start: Ticks, end: Ticks, meter: Meter, salt: u64) -> Self {
+        EvalContext {
+            start,
+            end,
+            meter,
+            salt,
+            preview: false,
+            sync: false,
+        }
+    }
 }
 
 /// A problem with one node (or with the graph, when `node` is empty).
@@ -60,6 +80,8 @@ pub struct CompileReport {
     pub issues: Vec<NodeIssue>,
     /// (node id, multi-line text) for every node that has something to show.
     pub previews: Vec<(String, String)>,
+    /// (node id, structured view such as a piano roll) for nodes that draw one.
+    pub views: Vec<(String, Json)>,
 }
 
 /// Notes leaving the graph through one sink node (MIDI out or a built-in instrument).
@@ -94,6 +116,8 @@ pub struct Graph {
     nodes: Vec<CompiledNode>,
     /// Evaluation order (sources first). Nodes in cycles are left out.
     order: Vec<usize>,
+    /// For each node, its upstream nodes in evaluation order (for phrase-length inputs).
+    ancestors: Vec<Vec<usize>>,
     issues: Vec<NodeIssue>,
 }
 
@@ -211,9 +235,25 @@ impl Graph {
             }
         }
 
+        // Ancestors of each node, in evaluation order.
+        let mut upstream = vec![vec![false; nodes.len()]; nodes.len()];
+        for &i in &order {
+            for &(src, _) in nodes[i].inputs.iter().flatten() {
+                let from = upstream[src].clone();
+                for (k, flag) in from.into_iter().enumerate() {
+                    upstream[i][k] |= flag;
+                }
+                upstream[i][src] = true;
+            }
+        }
+        let ancestors = (0..nodes.len())
+            .map(|i| order.iter().copied().filter(|&k| upstream[i][k]).collect())
+            .collect();
+
         Graph {
             nodes,
             order,
+            ancestors,
             issues,
         }
     }
@@ -257,6 +297,12 @@ impl Graph {
     }
 
     fn run(&self, ctx: &EvalContext) -> Evaluation {
+        self.run_subset(&self.order, ctx)
+    }
+
+    /// Evaluates `subset` (in order). A node that needs its inputs over a longer window
+    /// (a whole phrase) gets them from a separate evaluation of its ancestors.
+    fn run_subset(&self, subset: &[usize], ctx: &EvalContext) -> Evaluation {
         let mut outputs: Vec<Vec<Option<Value>>> = self
             .nodes
             .iter()
@@ -264,18 +310,29 @@ impl Graph {
             .collect();
         let mut sinks = Vec::new();
         let mut issues = Vec::new();
-        for &i in &self.order {
+        for &i in subset {
             let node = &self.nodes[i];
             let Some(imp) = &node.imp else { continue };
-            // Effects, mixers and audio outputs only process audio, in the rack.
-            if !imp.is_sink() && node.spec.outputs.iter().all(|o| o.ty == PortType::Audio) {
+            // Effects, mixers and audio outputs only process audio, in the rack; display
+            // nodes only run for previews.
+            if (!imp.is_sink()
+                && !node.spec.outputs.is_empty()
+                && node.spec.outputs.iter().all(|o| o.ty == PortType::Audio))
+                || (imp.view_only() && !ctx.preview)
+                || (node.spec.outputs.is_empty() && !imp.is_sink() && !imp.view_only())
+            {
                 continue;
             }
+            let wider = imp.input_window(ctx).filter(|&w| w != (ctx.start, ctx.end));
+            let sub = wider.map(|(start, end)| {
+                self.run_subset(&self.ancestors[i], &EvalContext { start, end, ..*ctx })
+            });
+            let source = sub.as_ref().map_or(&outputs, |s| &s.outputs);
             let mut values = Vec::with_capacity(node.inputs.len());
             let mut missing = false;
             for (slot, spec) in node.inputs.iter().zip(node.spec.inputs) {
                 let v = slot
-                    .and_then(|(src, out)| outputs[src][out].as_ref())
+                    .and_then(|(src, out)| source[src][out].as_ref())
                     .and_then(|v| v.convert(spec.ty));
                 missing |= v.is_none() && !spec.optional;
                 values.push(v);
@@ -325,12 +382,14 @@ impl Graph {
 
     /// Issues plus a short text preview of every node's output, evaluated over the
     /// first `bars` bars.
-    pub fn report(&self, meter: Meter, bars: u32) -> CompileReport {
+    pub fn report(&self, meter: Meter, bars: u32, sync: bool) -> CompileReport {
         let ctx = EvalContext {
             start: 0,
             end: meter.ticks_per_bar() * bars.max(1),
             meter,
             salt: 0,
+            preview: true,
+            sync,
         };
         let eval = self.run(&ctx);
         let mut issues = self.issues.clone();
@@ -369,7 +428,16 @@ impl Graph {
             };
             previews.push((node.id.clone(), text));
         }
-        CompileReport { issues, previews }
+        let views = self
+            .nodes
+            .iter()
+            .filter_map(|n| Some((n.id.clone(), n.imp.as_ref()?.view()?)))
+            .collect();
+        CompileReport {
+            issues,
+            previews,
+            views,
+        }
     }
 }
 
@@ -520,12 +588,7 @@ mod tests {
         let g = Graph::compile(&patch_two());
         assert!(g.issues().is_empty(), "{:?}", g.issues());
         let bar = Meter::COMMON.ticks_per_bar();
-        let out = g.evaluate(&EvalContext {
-            start: 0,
-            end: bar * 4,
-            meter: Meter::COMMON,
-            salt: 0,
-        });
+        let out = g.evaluate(&EvalContext::new(0, bar * 4, Meter::COMMON, 0));
         assert_eq!(out.len(), 1);
         assert_eq!(
             out[0].sink,
@@ -541,12 +604,7 @@ mod tests {
             .all(|n| n.pitch >= Pitch::parse("C3").unwrap()
                 && n.pitch <= Pitch::parse("C5").unwrap()));
         // A window in the middle returns only the notes that start in it.
-        let mid = g.evaluate(&EvalContext {
-            start: bar,
-            end: bar + PPQ,
-            meter: Meter::COMMON,
-            salt: 0,
-        });
+        let mid = g.evaluate(&EvalContext::new(bar, bar + PPQ, Meter::COMMON, 0));
         assert_eq!(mid[0].notes.len(), 4);
         assert!(mid[0].notes.iter().all(|n| n.start == bar));
     }
@@ -559,7 +617,7 @@ mod tests {
         doc.nodes.push(node("lonely", "arp", &[]));
         doc.wires.push(wire("prog", "chords", "lonely", "rhythm")); // wrong type
         let g = Graph::compile(&doc);
-        let report = g.report(Meter::COMMON, 4);
+        let report = g.report(Meter::COMMON, 4, true);
         let issue = |id: &str| {
             report
                 .issues
@@ -610,7 +668,7 @@ mod tests {
             ],
         };
         let g = Graph::compile(&doc);
-        let report = g.report(Meter::COMMON, 1);
+        let report = g.report(Meter::COMMON, 1, true);
         assert!(
             report
                 .previews
@@ -642,7 +700,7 @@ mod tests {
             ],
             wires: vec![wire("s", "scale", "m", "scale")],
         };
-        let r = Graph::compile(&doc).report(Meter::COMMON, 1);
+        let r = Graph::compile(&doc).report(Meter::COMMON, 1, true);
         assert_eq!(r.previews[0].1, "D Dorian · D E F G A B C");
         assert_eq!(r.previews[1].1, "F Lydian · F G A B C D E");
     }

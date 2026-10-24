@@ -6,6 +6,9 @@
 
 const SVG = 'http://www.w3.org/2000/svg';
 const WIDE = new Set(['progression', 'voice', 'voice_lead', 'drop', 'invert', 'play_chords', 'transpose', 'chord']);
+const XWIDE = new Set(['counterpoint', 'piano_roll']);
+// Voice colours for piano rolls: soprano, alto, tenor, bass, then extra voices.
+const VOICE_COLOR = ['#ff8a65', '#ffd54f', '#81c784', '#64b5f6', '#ba68c8', '#4dd0e1', '#f06292', '#aed581'];
 
 function el(tag, attrs = {}, ...children) {
   const e = document.createElement(tag);
@@ -170,12 +173,13 @@ export class Editor {
     const outs = el('div', { class: 'col' }, ...spec.outputs.map((p) => this.renderPort(n, p, 'out')));
     const params = el('div', { class: 'node-params' }, ...spec.params.map((p) => this.renderParam(n, p)));
     const node = el('div', {
-      class: `node${WIDE.has(n.type) ? ' wide' : ''}${this.selection.has(n.id) ? ' selected' : ''}`,
+      class: `node${WIDE.has(n.type) ? ' wide' : ''}${XWIDE.has(n.type) ? ' xwide' : ''}${this.selection.has(n.id) ? ' selected' : ''}`,
       dataset: { id: n.id, cat: spec.category },
       style: `left:${n.x}px;top:${n.y}px`,
     },
     el('div', { class: 'node-head', title: spec.help }, el('span', { class: 'title' }, spec.title), el('span', { class: 'cat' }, spec.category)),
     (spec.inputs.length || spec.outputs.length) ? el('div', { class: 'node-ports' }, ins, outs) : null,
+    el('div', { class: 'node-view' }),
     spec.params.length ? params : null,
     el('pre', { class: 'node-preview' }),
     el('div', { class: 'node-issue' }));
@@ -295,9 +299,34 @@ export class Editor {
       if (!node) continue;
       const pre = node.querySelector('.node-preview');
       const issue = node.querySelector('.node-issue');
-      if (pre) pre.textContent = report.previews?.[n.id] ?? '';
+      const data = report.views?.[n.id];
+      // A node with a piano roll doesn't also need the text preview.
+      if (pre) pre.textContent = data ? '' : report.previews?.[n.id] ?? '';
       if (issue) issue.textContent = (issues[n.id] ?? []).join('\n');
       node.classList.toggle('has-issue', !!issues[n.id]);
+      const view = node.querySelector('.node-view');
+      if (view) {
+        if (data?.kind === 'roll') view.replaceChildren(...renderRoll(data));
+        else view.replaceChildren();
+      }
+    }
+    this.lastTick = null;
+  }
+
+  /** Moves the playhead line on piano-roll views (tick = null hides it). */
+  setPlayhead(tick) {
+    if (tick === this.lastTick) return;
+    this.lastTick = tick;
+    for (const line of this.nodesEl.querySelectorAll('.roll-playhead')) {
+      const length = Number(line.dataset.length);
+      if (tick == null || !length) {
+        line.setAttribute('visibility', 'hidden');
+        continue;
+      }
+      const x = ROLL.left + ((tick % length) / length) * (ROLL.width - ROLL.left);
+      line.setAttribute('x1', x);
+      line.setAttribute('x2', x);
+      line.setAttribute('visibility', 'visible');
     }
   }
 
@@ -695,4 +724,107 @@ function round3(v) {
 function fmtLog(v) {
   if (v >= 1000) return `${round3(v / 1000)}k`;
   return String(round3(v));
+}
+
+// ---- Piano roll ------------------------------------------------------------------
+
+const ROLL = { width: 360, left: 26, row: 8, min: 110, max: 230 };
+
+function summary(minor, broken) {
+  const parts = [];
+  if (broken) parts.push(`${broken} rule${broken === 1 ? '' : 's'} broken`);
+  if (minor) parts.push(`${minor} minor issue${minor === 1 ? '' : 's'}`);
+  return parts.length ? parts.join(', ') : 'Follows every rule';
+}
+
+/** Builds a piano-roll SVG (plus a summary line) from an engine view. */
+function renderRoll(v) {
+  const notes = v.notes ?? [];
+  const head = el('div', { class: 'roll-head' });
+  const issues = v.marks ?? [];
+  if (v.cost !== undefined) {
+    const hard = issues.filter((m) => m.hard).length;
+    head.append(
+      el('span', {}, summary(issues.length - hard, hard)),
+      el('span', { class: 'roll-cost', title: 'Total cost: lower is better' }, `cost ${v.cost}`),
+    );
+    if (v.pending) head.append(el('span', { class: 'roll-pending' }, 'refining…'));
+    head.classList.toggle('bad', issues.some((m) => m.hard));
+  }
+  if (!notes.length) return [head, el('div', { class: 'roll-empty' }, 'No notes yet')];
+
+  let lo = Math.min(...notes.map((n) => n.p)) - 2;
+  let hi = Math.max(...notes.map((n) => n.p)) + 2;
+  const rows = hi - lo + 1;
+  const row = Math.max(2, Math.min(ROLL.row, (ROLL.max - 8) / rows));
+  const height = Math.max(ROLL.min, rows * row + 8);
+  const top = (height - rows * row) / 2;
+  const W = ROLL.width;
+  const x = (t) => ROLL.left + (t / v.length) * (W - ROLL.left);
+  const y = (p) => top + (hi - p) * row;
+  const root = svg('svg', { class: 'roll', viewBox: `0 0 ${W} ${height}`, width: W, height });
+
+  // Octave lines and labels at each C; bar lines.
+  for (let p = lo; p <= hi; p++) {
+    if (((p % 12) + 12) % 12 !== 0) continue;
+    root.append(svg('line', { x1: ROLL.left, x2: W, y1: y(p) + row, y2: y(p) + row, class: 'roll-oct' }));
+    const label = svg('text', { x: 2, y: y(p) + row, class: 'roll-label' });
+    label.textContent = `C${Math.floor(p / 12) - 1}`;
+    root.append(label);
+  }
+  for (let t = 0; t <= v.length; t += v.bar) {
+    root.append(svg('line', { x1: x(t), x2: x(t), y1: 0, y2: height, class: 'roll-bar' }));
+  }
+
+  const marksFor = new Map();
+  for (const m of issues) {
+    for (const i of [m.n, m.o]) if (i != null) (marksFor.get(i) ?? marksFor.set(i, []).get(i)).push(m);
+  }
+  const alts = new Map((v.alts ?? []).map((a) => [a.n, a]));
+
+  notes.forEach((n, i) => {
+    const color = VOICE_COLOR[n.v % VOICE_COLOR.length];
+    const marks = marksFor.get(i) ?? [];
+    const w = Math.max(2, x(n.t + n.d) - x(n.t) - 1);
+    const rect = svg('rect', {
+      x: x(n.t) + 0.5, y: y(n.p) + 0.5, width: w, height: Math.max(2, row - 1), rx: 1.5,
+      class: `roll-note${n.fixed ? ' fixed' : ''}${marks.length ? ' marked' : ''}${marks.some((m) => m.hard) ? ' hard' : ''}`,
+      style: `--c:${color}`,
+    });
+    const voice = v.voices?.[n.v] ?? `Voice ${n.v + 1}`;
+    const lines = [`${voice}: ${n.name}${n.fixed ? ' (fixed)' : ''}`];
+    for (const m of marks) {
+      const other = m.o != null && notes[m.o === i ? m.n : m.o];
+      const with_ = other && other !== n ? ` (with ${v.voices?.[other.v] ?? 'another voice'} ${other.name})` : '';
+      lines.push(`${m.hard ? '✖' : '⚠'} ${m.rule}${with_}, cost ${m.cost}`);
+    }
+    const alt = alts.get(i);
+    if (alt) lines.push(`Next best: ${alt.name}, costs ${alt.delta} more`);
+    else if (!n.fixed && v.cost !== undefined) lines.push('No other note fits here');
+    const title = svg('title');
+    title.textContent = lines.join('\n');
+    rect.append(title);
+    root.append(rect);
+  });
+
+  // Lines joining the two notes of each two-voice issue (parallels, crossing, ...).
+  for (const m of issues) {
+    if (m.o == null || m.o === m.n) continue;
+    const a = notes[m.n];
+    const b = notes[m.o];
+    if (!a || !b) continue;
+    root.append(svg('line', {
+      x1: x(a.t) + 3, y1: y(a.p) + row / 2, x2: x(b.t) + 3, y2: y(b.p) + row / 2,
+      class: `roll-link${m.hard ? ' hard' : ''}`,
+    }));
+  }
+
+  root.append(svg('line', { x1: 0, x2: 0, y1: 0, y2: height, class: 'roll-playhead', visibility: 'hidden', 'data-length': v.length }));
+
+  // Legend: the voices present.
+  const legend = el('div', { class: 'roll-legend' });
+  for (const vi of [...new Set(notes.map((n) => n.v))].sort((a, b) => a - b)) {
+    legend.append(el('span', { style: `--c:${VOICE_COLOR[vi % VOICE_COLOR.length]}` }, v.voices?.[vi] ?? `Voice ${vi + 1}`));
+  }
+  return [head, root, legend];
 }

@@ -1,9 +1,9 @@
 # Procedural Music (working title)
 
 A node-graph app for procedural music, built around music theory and multi-voice
-harmony. Roadmap phases 1 (theory core), 2 (graph, scheduler, MIDI out, node editor)
-and 3 (built-in instruments, effects and mixer) are in place; counterpoint (phase 4)
-comes next.
+harmony. Roadmap phases 1 (theory core), 2 (graph, scheduler, MIDI out, node editor),
+3 (built-in instruments, effects and mixer) and 4 (counterpoint) are in place;
+composition tools (phase 5) come next.
 
 ## Layout
 
@@ -11,7 +11,8 @@ comes next.
 | --- | --- |
 | `crates/theory` (`pm-theory`) | Theory core: tunings, pitches, scales, chords, Roman numerals, rhythms, progressions, voicing and voice leading. No dependencies; builds without `std`. |
 | `crates/synth` (`pm-synth`) | Built-in sound: poly and mono subtractive synths, a synthesized GM drum kit, filter, drive, chorus, delay, reverb, mixer, and the rack that wires them together. No dependencies. |
-| `crates/engine` (`pm-engine`) | Node catalog, graph evaluation, lookahead scheduler, MIDI dispatch and offline rendering, plus the JSON command API the UI talks to. Depends only on `pm-theory` and `pm-synth`. |
+| `crates/counterpoint` (`pm-counterpoint`) | The counterpoint solver: species rhythms, the rule set, beam search with local improvement, and explanations (which rules each note bends, and the next-best note). Depends only on `pm-theory`. |
+| `crates/engine` (`pm-engine`) | Node catalog, graph evaluation, lookahead scheduler, MIDI dispatch and offline rendering, plus the JSON command API the UI talks to. Depends on the three crates above. |
 | `crates/cli` (`pm`) | Command-line theory demo that writes MIDI files. |
 | `app` (`pm-app`) | Tauri 2 desktop app: hosts the editor UI (`app/ui`, plain HTML/JS, no build step), runs the engine on a scheduler thread, plays audio with `cpal` and sends MIDI with `midir`. Its own Cargo workspace. |
 | `scripts` | `build.bat` (tests + app build, output to `build-log.txt`) and `run.bat` (start the app). |
@@ -34,8 +35,8 @@ file faster than real time.
 
 ### Using the editor
 
-- **Examples ▾** loads the demo patches: *Modal explorer*, *Progression to pads*, *Full band*
-  (all on the built-in synths) and *Full band (MIDI)*.
+- **Examples ▾** loads the demo patches: *Modal explorer*, *Progression to pads*, *Full band*,
+  *First species*, *Chorale* (all on the built-in synths) and *Full band (MIDI)*.
 - Double-click the canvas (or press Tab) to add a node; type to search.
 - Drag from an output dot to an input dot to connect. Drop a wire on empty canvas to
   get a menu of nodes that accept it. Drag a connected input's dot to move or remove its wire.
@@ -47,10 +48,32 @@ file faster than real time.
   F frames everything, the mouse wheel zooms and dragging the background pans.
 - Ctrl+S saves a `.pmpatch` file; the current patch is also autosaved between sessions.
 
+### Counterpoint
+
+The **Counterpoint** node writes up to four voices (soprano, alto, tenor, bass). Set each
+voice to *Off*, *Free* (the solver writes it) or *Fixed* (the line wired into `fixed`, such
+as a cantus firmus). With no fixed voice, wire a progression into `chords` and it writes
+in chorale style. *Species* sets the rhythm (1st: note against note … 5th: florid);
+*Phrase bars* is how much it plans at once, and should match the length of the fixed
+line or progression.
+
+- The piano roll on the node shows the result. Orange outlines mark minor issues, red
+  outlines broken rules, and dashed lines join the two notes of a parallel or crossing.
+  Hover a note to see which rules it bends and what the next-best note would have cost.
+- The rule groups (Parallels, Dissonance, Melody, …) can be switched off to hear what
+  each one does.
+- *Variety* adds random preference so the solver picks among good answers; with *Lock*
+  on, the same seed gives the same line, and with it off you get a new line on each Play.
+- While playing, a quick answer is used at once and a more thorough search finishes in
+  the background (the roll shows *refining…* meanwhile). Exports always use the thorough
+  answer.
+- **Split voices** sends each voice to its own instrument (soprano = v1 … bass = v4), and
+  **Piano roll** shows the notes on any wire.
+
 ## Developing
 
 ```
-cargo test --workspace                           # theory, synth and engine tests
+cargo test --workspace                           # theory, synth, counterpoint and engine tests
 cargo run -p pm-engine --example dev_server      # the editor in a browser at http://127.0.0.1:8765
 cargo run --release -p pm-engine --example render -- patch.pmpatch out.wav 8
 cargo run -p pm-cli -- prog --key "C major" --out demo.mid "ii7 V7 Imaj7 -"
@@ -77,5 +100,9 @@ handy for working on the editor.
   than MIDI note numbers.
 - **Randomness is fresh unless locked.** Random nodes mix in a value that changes every
   time Play is pressed; turning on Lock makes their phrases repeat exactly.
+- **Counterpoint is a search, scored by rules.** Every rule adds a cost (strict rules a
+  large one), and a beam search followed by local improvement looks for the cheapest set
+  of lines. The cost breakdown is what the piano roll explains. Solutions are cached by
+  problem, so the scheduler only solves when something changes.
 - **Fixed-size theory values and integer time** (960 ticks per quarter note) keep the
   door open to running patches on a microcontroller later.

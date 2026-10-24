@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/theory", "crates/synth", "crates/engine", "crates/cli"]
+members = ["crates/theory", "crates/synth", "crates/counterpoint", "crates/engine", "crates/cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,3 +9,10 @@ license = "MIT OR Apache-2.0"
 
 [profile.release]
 lto = true
+
+# Keep the dev server and tests responsive.
+[profile.dev.package.pm-counterpoint]
+opt-level = 3
+
+[profile.dev.package.pm-synth]
+opt-level = 3

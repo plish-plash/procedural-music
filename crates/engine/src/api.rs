@@ -76,6 +76,7 @@ pub fn handle(
             Ok(Reply::json(status_json(engine, now)))
         }
         "status" => Ok(Reply::json(status_json(engine, now))),
+        "report" => Ok(Reply::json(report_json(&engine.report()))),
         other => Err(format!("unknown command '{other}'")),
     }
 }
@@ -87,6 +88,10 @@ pub fn status_json(engine: &Engine, now: f64) -> Json {
     Json::obj(vec![
         ("playing", Json::Bool(engine.is_playing())),
         ("bpm", Json::Num(engine.bpm())),
+        (
+            "solveGeneration",
+            Json::Num(crate::solve_generation() as f64),
+        ),
         ("tick", Json::Num(tick.floor())),
         ("bar", Json::Num(bar as f64 + 1.0)),
         ("beat", Json::Num(beat as f64 + 1.0)),
@@ -286,6 +291,7 @@ pub fn report_json(report: &CompileReport) -> Json {
                     .collect(),
             ),
         ),
+        ("views", Json::Obj(report.views.clone())),
     ])
 }
 

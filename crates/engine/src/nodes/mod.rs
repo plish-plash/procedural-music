@@ -1,5 +1,6 @@
 //! The node catalog: specs (shared with the UI) and implementations.
 
+mod counterpoint;
 mod melody;
 mod note_ops;
 mod output;
@@ -12,6 +13,8 @@ use std::collections::HashMap;
 use pm_theory::{Chord, Note, Rhythm, Scale, Ticks, PPQ};
 
 use pm_synth::ModuleKind;
+
+pub use counterpoint::solve_generation;
 
 use crate::graph::EvalContext;
 use crate::spec::{NodeSpec, ParamValue, Params};
@@ -39,6 +42,22 @@ pub trait NodeImpl: Send + Sync {
 
     /// For sound nodes: the module this node becomes in the audio rack.
     fn module(&self) -> Option<ModuleKind> {
+        None
+    }
+
+    /// For nodes that need their inputs over a longer span than the evaluation window
+    /// (a whole phrase): the window to evaluate their inputs over.
+    fn input_window(&self, _ctx: &EvalContext) -> Option<(Ticks, Ticks)> {
+        None
+    }
+
+    /// For display nodes: they only run when the editor asks for previews.
+    fn view_only(&self) -> bool {
+        false
+    }
+
+    /// A structured view for the editor (for example a piano roll), from the last preview.
+    fn view(&self) -> Option<crate::json::Json> {
         None
     }
 }
@@ -116,6 +135,10 @@ static SPECS: &[&NodeSpec] = &[
     &note_ops::QUANTIZE,
     &note_ops::VELOCITY,
     &note_ops::MERGE,
+    &counterpoint::SPLIT,
+    // Counterpoint and analysis
+    &counterpoint::COUNTERPOINT,
+    &counterpoint::PIANO_ROLL,
     // Built-in sound
     &sound::POLY_SYNTH,
     &sound::MONO_SYNTH,
@@ -170,6 +193,9 @@ pub fn build(
         "quantize" => note_ops::build_quantize(&p),
         "velocity" => note_ops::build_velocity(&p),
         "merge" => note_ops::build_merge(&p),
+        "counterpoint" => counterpoint::build_counterpoint(&p),
+        "split_voices" => counterpoint::build_split(&p),
+        "piano_roll" => counterpoint::build_piano_roll(&p),
         "midi_out" => output::build_midi_out(&p),
         "poly_synth" | "mono_synth" | "drum_synth" | "mixer" | "fx_filter" | "fx_drive"
         | "fx_chorus" | "fx_delay" | "fx_reverb" | "audio_out" => sound::build(spec.kind, &p),
@@ -179,10 +205,13 @@ pub fn build(
 
 // ---- Shared helpers -------------------------------------------------------
 
-pub(crate) const STEP_OPTIONS: &[&str] = &["1/4", "1/8", "1/16", "1/32", "1/8T", "1/16T"];
+pub(crate) const STEP_OPTIONS: &[&str] =
+    &["1/1", "1/2", "1/4", "1/8", "1/16", "1/32", "1/8T", "1/16T"];
 
 pub(crate) fn step_ticks(name: &str) -> Ticks {
     match name {
+        "1/1" => PPQ * 4,
+        "1/2" => PPQ * 2,
         "1/4" => PPQ,
         "1/8" => PPQ / 2,
         "1/32" => PPQ / 8,

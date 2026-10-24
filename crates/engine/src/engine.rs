@@ -103,6 +103,9 @@ pub struct Engine {
     audio: Vec<AudioMsg>,
     audio_events: Vec<TimedEvent>,
     next_note_id: u64,
+    /// When true, slow work (counterpoint solving) finishes before evaluation returns,
+    /// instead of improving in the background. For offline rendering and tests.
+    pub synchronous: bool,
     /// How far ahead of the playhead to schedule, in seconds.
     pub lookahead: f64,
     /// Size of each evaluation window in ticks. Graph edits take effect at the next window.
@@ -134,6 +137,7 @@ impl Engine {
             audio: vec![AudioMsg::Tempo(110.0)],
             audio_events: Vec::new(),
             next_note_id: 1,
+            synchronous: false,
             lookahead: 0.12,
             slice: PPQ / 4,
         }
@@ -160,7 +164,12 @@ impl Engine {
                 }
             }
         }
-        self.graph.report(self.meter, 4)
+        self.graph.report(self.meter, 4, self.synchronous)
+    }
+
+    /// Previews and views of the current graph (for refreshing after background work).
+    pub fn report(&self) -> CompileReport {
+        self.graph.report(self.meter, 4, self.synchronous)
     }
 
     /// The document of the current graph.
@@ -339,10 +348,8 @@ impl Engine {
 
     fn schedule_window(&mut self, start: Ticks, end: Ticks) {
         let ctx = EvalContext {
-            start,
-            end,
-            meter: self.meter,
-            salt: self.salt,
+            sync: self.synchronous,
+            ..EvalContext::new(start, end, self.meter, self.salt)
         };
         for sink in self.graph.evaluate(&ctx) {
             let (port, channel) = match sink.sink {

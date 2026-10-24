@@ -19,6 +19,7 @@ pub fn render(
     const BLOCK: usize = 256;
     let sr = sample_rate as f64;
     let mut engine = Engine::new();
+    engine.synchronous = true;
     engine.set_graph(doc);
     engine.set_bpm(0.0, bpm);
     let beats = (bars * engine.meter().beats as u32) as f64 * 4.0 / engine.meter().unit as f64;

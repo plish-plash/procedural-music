@@ -23,7 +23,7 @@ pub use engine::{Engine, MidiMessage, DEFAULT_PORT};
 pub use graph::{
     module_id, CompileReport, EvalContext, Graph, GraphDoc, NodeDoc, NodeIssue, SinkOutput, WireDoc,
 };
-pub use nodes::{spec_for, specs, Sink};
+pub use nodes::{solve_generation, spec_for, specs, Sink};
 pub use spec::{NodeSpec, ParamKind, ParamSpec, ParamValue, PortSpec, PortType};
 pub use timeline::{Segment, Timeline};
 pub use value::Value;

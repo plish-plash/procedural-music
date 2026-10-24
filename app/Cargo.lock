@@ -2817,9 +2817,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pm-counterpoint"
+version = "0.1.0"
+dependencies = [
+ "pm-theory",
+]
+
+[[package]]
 name = "pm-engine"
 version = "0.1.0"
 dependencies = [
+ "pm-counterpoint",
  "pm-synth",
  "pm-theory",
 ]
