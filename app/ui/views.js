@@ -8,7 +8,7 @@
 import { el, svg } from './dom.js';
 
 // Voice colours for piano rolls: soprano, alto, tenor, bass, then extra voices.
-const VOICE_COLOR = ['#ff8a65', '#ffd54f', '#81c784', '#64b5f6', '#ba68c8', '#4dd0e1', '#f06292', '#aed581'];
+export const VOICE_COLOR = ['#ff8a65', '#ffd54f', '#81c784', '#64b5f6', '#ba68c8', '#4dd0e1', '#f06292', '#aed581'];
 
 /** Lights up the views inside `container` at `tick` (null: stopped). */
 export function showPlayhead(container, tick) {
@@ -300,7 +300,7 @@ export function renderSteps(v) {
 const LETTERS = 'CDEFGAB';
 
 /** Diatonic step (C4 = 28) and accidental of a spelled note name such as "F#4" or "Bb3". */
-function parseName(name) {
+export function parseName(name) {
   const m = /^([A-G])(bb|b|##|#|x)?(-?\d+)$/.exec(name);
   if (!m) return null;
   const acc = { b: -1, bb: -2, '#': 1, '##': 2, x: 2 }[m[2]] ?? 0;

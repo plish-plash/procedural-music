@@ -303,7 +303,7 @@ pub fn parse_graph(doc: &Json) -> Result<GraphDoc, String> {
 }
 
 /// Every note of the song by part, for the arrangement overview: `{length, bar, parts:
-/// [{node, name, notes: [[start, duration, key, velocity], ...]}]}`.
+/// [{node, name, notes: [[start, duration, key, velocity, voice, spelled name], ...]}]}`.
 pub fn song_json(engine: &Engine, bars: u32) -> Json {
     let parts = engine.song_notes(bars, false, 0);
     let bar = engine.meter().ticks_per_bar();
@@ -328,6 +328,8 @@ pub fn song_json(engine: &Engine, bars: u32) -> Json {
                         Json::Num(n.duration as f64),
                         Json::Num(key as f64),
                         Json::Num(n.velocity as f64),
+                        Json::Num(n.voice as f64),
+                        Json::str(n.pitch.to_string()),
                     ])
                 })
                 .collect();

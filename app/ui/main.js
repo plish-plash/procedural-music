@@ -466,6 +466,7 @@ async function init() {
     onLibrarySave: saveToLibrary,
     onAudition: audition,
     onProbe: probe,
+    onSelect: (flats) => timeline?.setHighlight(flats),
   });
   inspector = new Inspector({ root: $('inspector'), editor, onLibrarySave: saveToLibrary });
   editor.inspector = inspector;

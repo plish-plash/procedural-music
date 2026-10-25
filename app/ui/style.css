@@ -46,6 +46,8 @@ html, body { height: 100%; margin: 0; }
 body {
   display: grid;
   grid-template-rows: auto 1fr auto auto auto;
+  /* The window's width, never the content's: a wide timeline scrolls instead. */
+  grid-template-columns: minmax(0, 1fr);
   background: var(--bg);
   color: var(--text);
   font: 13px/1.35 var(--sans);
@@ -474,7 +476,7 @@ button.mini { padding: 1px 7px; font-size: 11px; border-radius: 5px; background:
 
 /* ---- Timeline ------------------------------------------------------------- */
 
-#timeline { background: var(--panel); border-top: 1px solid var(--line); display: flex; flex-direction: column; max-height: 260px; }
+#timeline { background: var(--panel); border-top: 1px solid var(--line); display: flex; flex-direction: column; max-height: min(50vh, 480px); }
 body.perform #timeline { display: none; }
 .tl-bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .tl-bar strong { color: var(--text-2); font-weight: 600; margin-right: 4px; }
@@ -511,6 +513,27 @@ body.perform #timeline { display: none; }
 .tl-playhead.playing { opacity: 0.9; }
 .tl-cursor { fill: #e8ecf3; opacity: 0.8; pointer-events: none; }
 .tl-drop { stroke: #ffd27a; stroke-width: 3; }
+.tl-beat { stroke: #1d222c; stroke-width: 1; }
+.tl-zoom { display: inline-flex; gap: 2px; }
+.tl-zoom button { min-width: 26px; }
+/* Lanes: click a part's name to open its notes as a roll or staff. */
+.tl-label.lane { gap: 6px; }
+.tl-lane-name {
+  border: 0; background: none; padding: 0; color: inherit; font: inherit; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.tl-lane-name:hover { color: var(--text); }
+.tl-label.open { position: relative; flex-direction: column; align-items: flex-start; justify-content: flex-start; padding-top: 4px; }
+.tl-label.open .view-toggle { margin-left: 0; }
+.tl-label.hl { color: var(--text); box-shadow: inset 3px 0 0 var(--accent); }
+.tl-lane.hl { fill: #1b2333; }
+.tl-mark { position: absolute; right: 6px; transform: translateY(-100%); font: 9.5px var(--mono); color: var(--text-3); pointer-events: none; }
+.tl-mark.clef { font: 20px/1 serif; transform: translateY(-62%); color: var(--text-2); }
+.tl-black { fill: rgba(0, 0, 0, 0.18); }
+.tl-oct-line { stroke: #2a3140; stroke-width: 1; }
+.tl-staff-line { stroke: #4a5263; stroke-width: 1; }
+.tl-staff-len { stroke-width: 1.5; opacity: 0.35; }
+.tl-staff-acc { fill: #d9dee7; font-size: 10px; }
 .tl-empty { padding: 4px 12px 8px; color: var(--text-3); font-size: 12px; }
 .tl-empty[hidden] { display: none; }
 

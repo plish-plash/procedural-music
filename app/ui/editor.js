@@ -95,8 +95,8 @@ function uniqueName(list, base) {
 }
 
 export class Editor {
-  constructor({ canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, specs, onChange, onLibrarySave, onSectionMode, onAudition, onProbe }) {
-    Object.assign(this, { canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, onChange, onLibrarySave, onSectionMode, onAudition, onProbe });
+  constructor({ canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, specs, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect }) {
+    Object.assign(this, { canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect });
     // The card shown while hovering a wire: what the wire carries.
     this.probe = { el: el('div', { class: 'probe', hidden: '' }), wire: null, timer: null, cache: new Map(), x: 0, y: 0 };
     document.body.append(this.probe.el);
@@ -200,6 +200,7 @@ export class Editor {
 
   afterNavigate() {
     this.selection.clear();
+    this.onSelect?.([]);
     this.selectedWire = null;
     this.renderAll();
     const saved = this.views[this.path.join('/')];
@@ -1325,6 +1326,7 @@ export class Editor {
     for (const e of this.nodesEl.querySelectorAll('.node')) e.classList.toggle('selected', this.selection.has(e.dataset.id));
     this.updateWires();
     this.inspect();
+    this.onSelect?.([...this.selection].filter((id) => id !== IN && id !== OUT).map((id) => this.flat(id)));
   }
 
   // ---- Interaction ---------------------------------------------------------------------

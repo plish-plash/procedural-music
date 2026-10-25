@@ -102,6 +102,11 @@ notes below. Each section has a name, a length in bars and, optionally, its own 
 - Each section starts its own time from bar 1, so a progression or phrase restarts with
   every section. Random nodes that aren't locked play something new in each section.
 - **Play once / Loop song / Loop section** sets what Play does.
+- Click a part's name to open its lane into a piano roll (voices in colour) or, with
+  **Staff**, onto a staff (treble, bass or both, as the notes need), across the whole song.
+  Selecting a node marks the lane of the part it belongs to.
+- **− Fit +** (or Ctrl+wheel) zooms the timeline; the wheel and the scrollbar move along
+  the song (Shift+wheel when open lanes are scrolling up and down).
 
 ### Performing
 

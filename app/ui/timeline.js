@@ -1,12 +1,24 @@
 // The arrangement timeline: sections along the song, an overview of every part's notes,
 // the playhead, and the controls for editing sections.
+//
+// Each part's lane is a thin strip of its notes; clicking its name opens it into a full
+// piano roll or staff over the same bars. The view zooms (Ctrl+wheel, − Fit +) and scrolls
+// (the wheel or the scrollbar).
 
-import { el, svg } from './editor.js';
+import { el, svg } from './dom.js';
+import { parseName, VOICE_COLOR } from './views.js';
 
 const RULER = 18;
 const STRIP = 30;
 const LANE = 26;
-const LABELS = 120;
+// Zoom limits, in pixels per bar.
+const MIN_ZOOM = 2;
+const MAX_ZOOM = 240;
+// An open lane's piano roll: row height range and the tallest it gets.
+const ROLL_ROW = { min: 4, max: 9 };
+const ROLL_MAX = 200;
+// An open lane's staff: pixels per diatonic step.
+const STAFF_STEP = 3.5;
 
 /** A stable colour for a section name, so repeats of a section match. */
 function hue(name) {
@@ -19,6 +31,36 @@ function nextName(sections) {
   const used = new Set(sections.map((s) => s.name));
   for (const c of 'ABCDEFGHIJKLMNOPQRSTUVWXYZ') if (!used.has(c)) return c;
   return `Section ${sections.length + 1}`;
+}
+
+/** Pitch rows of a lane opened as a piano roll: the notes' range plus a row each side. */
+function rollLayout(notes) {
+  const keys = notes.map((n) => n[2]);
+  const lo = (keys.length ? Math.min(...keys) : 60) - 1;
+  const hi = (keys.length ? Math.max(...keys) : 71) + 1;
+  const rows = hi - lo + 1;
+  const row = Math.max(ROLL_ROW.min, Math.min(ROLL_ROW.max, ROLL_MAX / rows));
+  return { lo, hi, row, height: rows * row + 8 };
+}
+
+/**
+ * Staff positions of a lane opened as a staff (diatonic steps, C4 = 28): the treble
+ * staff, the bass staff or both, whichever the notes need, plus room for ledger lines.
+ * Null when a note has no letter name (another tuning).
+ */
+function staffLayout(notes) {
+  const parsed = notes.map((n) => parseName(n[5] ?? ''));
+  if (parsed.some((p) => !p)) return null;
+  const steps = parsed.map((p) => p.step);
+  let treble = steps.some((s) => s >= 28);
+  let bass = steps.some((s) => s < 28);
+  if (!treble && !bass) treble = bass = true;
+  // Outer staff lines: F5 (38) or A3 (26) on top, G2 (18) or E4 (30) at the bottom.
+  const high = treble ? 38 : 26;
+  const low = bass ? 18 : 30;
+  const top = Math.max(high + 2, ...steps.map((s) => s + 2));
+  const bottom = Math.min(low - 2, ...steps.map((s) => s - 2));
+  return { parsed, treble, bass, high, low, top, bottom, height: (top - bottom) * STAFF_STEP + 12 };
 }
 
 function formatTime(seconds) {
@@ -46,6 +88,9 @@ export class Timeline {
     this.loop = 'song';
     this.sectionEdit = false;
     this.bar = 3840;
+    this.zoom = null; // pixels per bar, or null to fit the song to the width
+    this.open = new Map(); // part node -> 'roll' | 'staff', for lanes opened up
+    this.highlight = []; // flat ids of the selected nodes: their parts' lanes are marked
     this.build();
   }
 
@@ -93,15 +138,28 @@ export class Timeline {
     this.scroll = el('div', { class: 'tl-scroll' }, this.svg);
     this.empty = el('div', { class: 'tl-empty' },
       'No sections yet: the graph plays continuously. Add sections to arrange a song; each can have its own length, tempo and settings.');
+    const zoom = el('span', { class: 'tl-zoom' },
+      el('button', { class: 'mini', title: 'Zoom out (Ctrl+wheel)', onclick: () => this.zoomBy(1 / 1.5) }, '−'),
+      el('button', { class: 'mini', title: 'Fit the song to the width', onclick: () => this.fit() }, 'Fit'),
+      el('button', { class: 'mini', title: 'Zoom in (Ctrl+wheel)', onclick: () => this.zoomBy(1.5) }, '+'));
+    this.body = el('div', { class: 'tl-body' }, this.labels, this.scroll);
     this.root.replaceChildren(
       el('div', { class: 'tl-bar' }, el('strong', {}, 'Arrangement'), this.addBtn, this.selected,
-        el('span', { class: 'tl-spacer' }), this.loopSel, this.info),
-      el('div', { class: 'tl-body' }, this.labels, this.scroll),
+        el('span', { class: 'tl-spacer' }), zoom, this.loopSel, this.info),
+      this.body,
       this.empty);
+    this.body.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     this.svg.addEventListener('pointerdown', (e) => this.onDown(e));
     window.addEventListener('pointermove', (e) => this.onMove(e));
     window.addEventListener('pointerup', (e) => this.onUp(e));
-    new ResizeObserver(() => this.render()).observe(this.scroll);
+    // Redraw when the visible width changes (a scrollbar coming and going changes only
+    // the height, which needs no redraw).
+    let seenWidth = 0;
+    new ResizeObserver(() => {
+      if (this.scroll.clientWidth === seenWidth) return;
+      seenWidth = this.scroll.clientWidth;
+      this.render();
+    }).observe(this.scroll);
   }
 
   edit(fn) {
@@ -186,6 +244,77 @@ export class Timeline {
     this.drawPlayhead();
   }
 
+  // ---- Zoom, scrolling and lanes -----------------------------------------------------
+
+  /** Zooms keeping the bar at `px` (from the left of the visible area) in place. */
+  zoomAt(px, factor) {
+    const old = this.pxBar;
+    const next = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, old * factor));
+    if (next === old) return;
+    const bar = (this.scroll.scrollLeft + px) / old;
+    this.zoom = next;
+    this.render();
+    this.scroll.scrollLeft = bar * next - px;
+  }
+
+  /** Zooms around the playhead when it's in view, else the middle. */
+  zoomBy(factor) {
+    const w = this.scroll.clientWidth;
+    const head = this.x ? this.x(this.status?.songTick ?? 0) - this.scroll.scrollLeft : -1;
+    this.zoomAt(head >= 0 && head <= w ? head : w / 2, factor);
+  }
+
+  fit() {
+    this.zoom = null;
+    this.render();
+    this.scroll.scrollLeft = 0;
+  }
+
+  onWheel(e) {
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      const r = this.scroll.getBoundingClientRect();
+      this.zoomAt(e.clientX - r.left, Math.exp(-e.deltaY * 0.002));
+      return;
+    }
+    // An up-down wheel moves along the song, unless there are lanes to scroll through.
+    const vertical = Math.abs(e.deltaY) > Math.abs(e.deltaX);
+    const tall = this.body.scrollHeight > this.body.clientHeight + 1;
+    if (vertical && (e.shiftKey || !tall)) {
+      e.preventDefault();
+      this.scroll.scrollLeft += e.deltaY;
+    }
+  }
+
+  /** Marks the lanes of the parts that the selected nodes (flat ids) belong to. */
+  setHighlight(flats) {
+    const lanes = () => (this.song?.parts ?? []).map((p) => this.highlighted(p)).join();
+    const before = lanes();
+    this.highlight = flats;
+    if (lanes() !== before) this.render();
+  }
+
+  /** Whether a part's lane belongs to a selected node: the part's output itself, a
+   * group around it, or anything in the same group. */
+  highlighted(part) {
+    const inside = part.node.slice(0, part.node.lastIndexOf('/'));
+    return this.highlight.some((sel) => sel === part.node
+      || part.node.startsWith(`${sel}/`)
+      || (inside && sel.startsWith(`${inside}/`)));
+  }
+
+  /** Opens a part's lane into a piano roll, or closes it. */
+  toggleLane(node) {
+    if (this.open.has(node)) this.open.delete(node);
+    else this.open.set(node, 'roll');
+    this.render();
+  }
+
+  setLaneMode(node, mode) {
+    this.open.set(node, mode);
+    this.render();
+  }
+
   /** Song layout in ticks: [{start, length}] per section. */
   layout() {
     let t = 0;
@@ -220,20 +349,34 @@ export class Timeline {
     this.info.textContent = `${bars} bars · ${formatTime(seconds)}`;
 
     const parts = this.song?.parts ?? [];
+    // Fitted, the whole song fills the visible width (leaving room for the last bar
+    // line); zoomed, it scrolls.
     const width = Math.max(200, this.scroll.clientWidth - 2);
-    const pxBar = Math.max(10, Math.min(48, width / Math.max(1, bars)));
+    const fit = Math.max(MIN_ZOOM, Math.min(48, (width - 4) / Math.max(1, bars)));
+    const pxBar = this.zoom ?? fit;
     this.pxBar = pxBar;
     const W = Math.max(width, bars * pxBar + 4);
-    const H = RULER + STRIP + parts.length * LANE + 4;
+    // Each lane is a strip of notes, or opened up into a piano roll or a staff.
+    const lanes = parts.map((part) => {
+      const staff = this.open.get(part.node) === 'staff' ? staffLayout(part.notes) : null;
+      if (staff) return { part, mode: 'staff', staff, height: staff.height };
+      if (this.open.has(part.node)) {
+        const roll = rollLayout(part.notes);
+        return { part, mode: 'roll', roll, height: roll.height };
+      }
+      return { part, mode: null, height: LANE };
+    });
+    const H = RULER + STRIP + lanes.reduce((sum, l) => sum + l.height, 0) + 4;
     const x = (tick) => (tick / this.bar) * pxBar;
     this.svg.setAttribute('width', W);
     this.svg.setAttribute('height', H);
     this.svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
     const nodes = [];
 
-    // Ruler: bar numbers, every few bars depending on zoom.
-    const every = pxBar >= 28 ? 1 : pxBar >= 14 ? 2 : 4;
+    // Ruler: bar numbers, every few bars depending on zoom; beats when zoomed in far.
+    const every = [1, 2, 4, 8, 16, 32, 64].find((n) => n * pxBar >= 28) ?? 128;
     nodes.push(svg('rect', { x: 0, y: 0, width: W, height: RULER, class: 'tl-ruler' }));
+    const beats = Math.max(1, Math.round(this.bar / 960));
     for (let b = 0; b <= bars; b++) {
       const major = b % every === 0;
       nodes.push(svg('line', { x1: x(b * this.bar), x2: x(b * this.bar), y1: major ? 6 : 12, y2: H, class: major ? 'tl-tick major' : 'tl-tick' }));
@@ -241,6 +384,12 @@ export class Timeline {
         const t = svg('text', { x: x(b * this.bar) + 3, y: 13, class: 'tl-num' });
         t.textContent = b + 1;
         nodes.push(t);
+      }
+      if (pxBar >= 16 * beats && b < bars) {
+        for (let k = 1; k < beats; k++) {
+          const bx = x(b * this.bar + (k * this.bar) / beats);
+          nodes.push(svg('line', { x1: bx, x2: bx, y1: 14, y2: H, class: 'tl-beat' }));
+        }
       }
     }
 
@@ -260,21 +409,21 @@ export class Timeline {
       nodes.push(g);
     });
 
-    // Part lanes: a mini piano roll per part.
+    // Part lanes.
     const labelRows = [el('div', { class: 'tl-label', style: `height:${RULER}px` }), el('div', { class: 'tl-label sec', style: `height:${STRIP}px` }, 'Sections')];
-    parts.forEach((part, li) => {
-      const top = RULER + STRIP + li * LANE;
-      nodes.push(svg('rect', { x: 0, y: top, width: W, height: LANE, class: `tl-lane${li % 2 ? ' odd' : ''}` }));
-      const keys = part.notes.map((n) => n[2]);
-      const lo = Math.min(...keys);
-      const hi = Math.max(...keys);
-      const span = Math.max(1, hi - lo);
+    let top = RULER + STRIP;
+    lanes.forEach((lane, li) => {
+      const { part, mode, height } = lane;
+      const hl = this.highlighted(part);
+      nodes.push(svg('rect', { x: 0, y: top, width: W, height, class: `tl-lane${li % 2 ? ' odd' : ''}${hl ? ' hl' : ''}` }));
       const color = `hsl(${(li * 67 + 200) % 360} 65% 62%)`;
-      for (const [t, d, k] of part.notes) {
-        const ny = top + 3 + (1 - (k - lo) / span) * (LANE - 9);
-        nodes.push(svg('rect', { x: x(t), y: ny, width: Math.max(1.2, x(d) - 0.6), height: 2.6, fill: color, class: 'tl-note' }));
-      }
-      labelRows.push(el('div', { class: 'tl-label', style: `height:${LANE}px`, title: part.name }, part.name));
+      // Marks in the label column (octaves, clefs), at heights within the lane.
+      const marks = [];
+      if (mode === 'roll') this.drawRoll(nodes, marks, part, lane.roll, top, W, x, color);
+      else if (mode === 'staff') this.drawStaff(nodes, marks, part, lane.staff, top, W, x);
+      else this.drawStrip(nodes, part, top, x, color);
+      labelRows.push(this.laneLabel(lane, hl, marks));
+      top += height;
     });
     if (!parts.length) labelRows.push(el('div', { class: 'tl-label dim', style: `height:${LANE}px` }, 'No parts playing'));
 
@@ -285,6 +434,94 @@ export class Timeline {
     this.labels.replaceChildren(...labelRows);
     this.x = x;
     this.drawPlayhead();
+  }
+
+  /** A closed lane: every note as a thin dash, scaled to the part's range. */
+  drawStrip(nodes, part, top, x, color) {
+    const keys = part.notes.map((n) => n[2]);
+    const lo = Math.min(...keys);
+    const span = Math.max(1, Math.max(...keys) - lo);
+    for (const [t, d, k] of part.notes) {
+      const ny = top + 3 + (1 - (k - lo) / span) * (LANE - 9);
+      nodes.push(svg('rect', { x: x(t), y: ny, width: Math.max(1.2, x(d) - 0.6), height: 2.6, fill: color, class: 'tl-note' }));
+    }
+  }
+
+  /** A lane opened as a piano roll: one row per semitone, octave lines at each C, notes
+   * coloured by voice when the part has several (counterpoint, chords). */
+  drawRoll(nodes, marks, part, L, top, W, x, color) {
+    const y = (k) => top + 4 + (L.hi - k) * L.row;
+    for (let k = L.lo; k <= L.hi; k++) {
+      const pc = ((k % 12) + 12) % 12;
+      if ([1, 3, 6, 8, 10].includes(pc)) nodes.push(svg('rect', { x: 0, y: y(k), width: W, height: L.row, class: 'tl-black' }));
+      if (pc === 0) {
+        nodes.push(svg('line', { x1: 0, x2: W, y1: y(k) + L.row, y2: y(k) + L.row, class: 'tl-oct-line' }));
+        marks.push([y(k) + L.row - top, `C${Math.floor(k / 12) - 1}`, 'oct']);
+      }
+    }
+    const voices = new Set(part.notes.map((n) => n[4])).size > 1;
+    for (const [t, d, k, vel, v] of part.notes) {
+      nodes.push(svg('rect', {
+        x: x(t) + 0.5, y: y(k) + 0.5, width: Math.max(1.5, x(d) - 1), height: Math.max(2, L.row - 1), rx: 1,
+        fill: voices ? VOICE_COLOR[(v ?? 0) % VOICE_COLOR.length] : color,
+        'fill-opacity': (0.55 + 0.45 * (vel / 127)).toFixed(2),
+        class: 'tl-note',
+      }));
+    }
+  }
+
+  /** A lane opened as a staff: noteheads at their spelled pitches, with a faint line for
+   * each note's length, ledger lines and accidentals. */
+  drawStaff(nodes, marks, part, S, top, W, x) {
+    const y = (s) => top + 6 + (S.top - s) * STAFF_STEP;
+    // Treble lines E4 G4 B4 D5 F5 and bass lines G2 B2 D3 F3 A3.
+    const lines = [...(S.treble ? [30, 32, 34, 36, 38] : []), ...(S.bass ? [18, 20, 22, 24, 26] : [])];
+    for (const s of lines) nodes.push(svg('line', { x1: 0, x2: W, y1: y(s), y2: y(s), class: 'tl-staff-line' }));
+    if (S.treble) marks.push([y(31.2) - top, '𝄞', 'clef treble']);
+    if (S.bass) marks.push([y(24.6) - top, '𝄢', 'clef bass']);
+    const voices = new Set(part.notes.map((n) => n[4])).size > 1;
+    part.notes.forEach(([t, d, , , v], i) => {
+      const { step, acc } = S.parsed[i];
+      const cx = x(t) + 4;
+      const cy = y(step);
+      const fill = voices ? VOICE_COLOR[(v ?? 0) % VOICE_COLOR.length] : '#d9dee7';
+      nodes.push(svg('line', { x1: cx, x2: Math.max(cx, x(t + d)), y1: cy, y2: cy, stroke: fill, class: 'tl-staff-len' }));
+      // Ledger lines beyond the staves shown, and middle C between them.
+      const ledgers = [];
+      for (let s = S.high + 2; s <= step; s += 2) ledgers.push(s);
+      for (let s = S.low - 2; s >= step; s -= 2) ledgers.push(s);
+      if (step === 28 && S.treble && S.bass) ledgers.push(28);
+      for (const s of ledgers) nodes.push(svg('line', { x1: cx - 5.5, x2: cx + 5.5, y1: y(s), y2: y(s), class: 'tl-staff-line' }));
+      if (acc) {
+        const a = svg('text', { x: cx - 10, y: cy + 3.5, class: 'tl-staff-acc' });
+        a.textContent = { 1: '♯', 2: '𝄪', '-1': '♭', '-2': '𝄫' }[acc];
+        nodes.push(a);
+      }
+      nodes.push(svg('ellipse', { cx, cy, rx: 3.8, ry: 2.7, fill, transform: `rotate(-20 ${cx} ${cy})` }));
+    });
+  }
+
+  /** A lane's name (click to open or close it), its Roll/Staff choice and marks when open. */
+  laneLabel(lane, hl, marks) {
+    const { part, mode, height } = lane;
+    const label = el('div', {
+      class: `tl-label lane${mode ? ' open' : ''}${hl ? ' hl' : ''}`,
+      style: `height:${height}px`,
+      title: `${part.name} · click to ${mode ? 'close' : 'open'} its notes`,
+    });
+    label.append(el('button', { class: 'tl-lane-name', onclick: () => this.toggleLane(part.node) }, `${mode ? '▾' : '▸'} ${part.name}`));
+    if (mode) {
+      const staffable = !!staffLayout(part.notes);
+      label.append(el('span', { class: 'view-toggle' },
+        el('button', { class: mode === 'roll' ? 'on' : '', onclick: () => this.setLaneMode(part.node, 'roll') }, 'Roll'),
+        el('button', {
+          class: mode === 'staff' ? 'on' : '', disabled: staffable ? null : '',
+          title: staffable ? 'Show on a grand staff' : 'Only notes with letter names can go on a staff',
+          onclick: () => this.setLaneMode(part.node, 'staff'),
+        }, 'Staff')));
+      for (const [at, text, cls] of marks) label.append(el('span', { class: `tl-mark ${cls}`, style: `top:${at}px` }, text));
+    }
+    return label;
   }
 
   drawPlayhead() {
