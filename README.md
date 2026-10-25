@@ -15,11 +15,8 @@ and composition (groups, the arrangement timeline, and MIDI/WAV export).
 | `crates/engine` (`pm-engine`) | Node catalog, graph evaluation, the arrangement and transport, lookahead scheduler, MIDI dispatch, offline rendering and MIDI file export, plus the JSON command API the UI talks to. Depends on the three crates above. |
 | `crates/cli` (`pm`) | Command-line theory demo that writes MIDI files. |
 | `app` (`pm-app`) | Tauri 2 desktop app: hosts the editor UI (`app/ui`, plain HTML/JS, no build step), runs the engine on a scheduler thread, plays audio with `cpal` and sends MIDI with `midir`. Its own Cargo workspace. |
-| `scripts` | `build.bat` (tests + app build, output to `build-log.txt`) and `run.bat` (start the app). |
 
 ## Running the app (Windows)
-
-Double-click `scripts\run.bat`, or from this folder:
 
 ```
 cargo run --manifest-path app\Cargo.toml
@@ -28,8 +25,7 @@ cargo run --manifest-path app\Cargo.toml
 The first build downloads and compiles Tauri, which takes a few minutes.
 
 The examples play through the built-in instruments on your default audio output. To
-drive external synths instead, end a chain in **MIDI out** and pick the port (with no
-hardware, the default port is Windows' **Microsoft GS Wavetable Synth**); set **Clock**
+drive external synths instead, end a chain in **MIDI out** and pick the port; set **Clock**
 in the toolbar to send MIDI clock. **Export WAV** renders the built-in instruments to a
 file faster than real time.
 
