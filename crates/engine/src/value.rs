@@ -2,6 +2,7 @@
 
 use pm_theory::{Chord, Note, Rhythm, Scale};
 
+use crate::control::Control;
 use crate::spec::PortType;
 use crate::timeline::Timeline;
 
@@ -13,6 +14,7 @@ pub enum Value {
     Chord(Timeline<Chord>),
     Rhythm(Box<Rhythm>),
     Notes(Vec<Note>),
+    Control(Control),
 }
 
 impl Value {
@@ -22,6 +24,7 @@ impl Value {
             Value::Chord(_) => PortType::Chord,
             Value::Rhythm(_) => PortType::Rhythm,
             Value::Notes(_) => PortType::Notes,
+            Value::Control(_) => PortType::Control,
         }
     }
 

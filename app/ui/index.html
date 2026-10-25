@@ -45,16 +45,19 @@
     </div>
   </header>
 
-  <main id="canvas" tabindex="0">
-    <div id="world">
-      <svg id="wires" width="1" height="1"></svg>
-      <div id="nodes"></div>
-    </div>
-    <nav id="crumbs" hidden></nav>
-    <div id="empty-hint" hidden>
-      <p>Double-click anywhere to add a node, or open an example from the toolbar.</p>
-    </div>
-  </main>
+  <div id="workspace">
+    <main id="canvas" tabindex="0">
+      <div id="world">
+        <svg id="wires" width="1" height="1"></svg>
+        <div id="nodes"></div>
+      </div>
+      <nav id="crumbs" hidden></nav>
+      <div id="empty-hint" hidden>
+        <p>Double-click anywhere to add a node, or open an example from the toolbar.</p>
+      </div>
+    </main>
+    <aside id="inspector"></aside>
+  </div>
 
   <section id="timeline"></section>
   <section id="cue-bar"></section>
@@ -63,7 +66,7 @@
     <span id="file-name">Untitled</span>
     <span id="status-msg"></span>
     <span id="audio-status"></span>
-    <span class="hint">Double-click: add node · Ctrl+G: group · Shift-drag: select · Del: remove · Wheel: zoom</span>
+    <span class="hint">Double-click: add node · Ctrl+G: group · Shift-drag: select · Del: remove · Wheel: zoom · I: inspector</span>
   </footer>
 
   <div id="add-menu" hidden>

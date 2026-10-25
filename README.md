@@ -39,12 +39,25 @@ file faster than real time.
 - Drag from an output dot to an input dot to connect. Drop a wire on empty canvas to
   get a menu of nodes that accept it. Drag a connected input's dot to move or remove its wire.
 - Port colors: scale (teal), chord (amber), rhythm (pink), notes (blue), audio (lime
-  triangles). A chord wired into a scale input is converted automatically (shown with a
-  badge on the wire). Sound chains run instrument → effects → Mixer → Audio out.
-- Every node shows a live preview of its output, and problems in red: scales and chords
-  on a keyboard (a progression also gets a strip of its chords; hover one to see it),
-  rhythms as a step grid, notes as a small piano roll. While playing, the current chord
-  and step light up. Hover a preview for the text version.
+  triangles), control (violet triangles). A chord wired into a scale input is converted
+  automatically (shown with a badge on the wire). Sound chains run instrument → effects →
+  Mixer → Audio out.
+- Nodes are compact: a title, ports, and a red ! when something is wrong. Select one to see
+  everything about it in the **inspector** on the right (I shows or hides it): its help,
+  problems, a live preview of its output and all its settings.
+- Previews draw scales and chords on a keyboard (a progression also gets a strip of its
+  chords; hover one to see it), rhythms as a step grid, notes as a small piano roll and
+  controls as a curve. While playing, the current chord and step light up.
+- **Pin** (●) the preview or a setting in the inspector to show it on the node too. Source
+  nodes (Scale, Progression, Pattern, LFO…), Counterpoint and Piano roll show their
+  preview by default.
+- A pinned number setting gets a violet input on the node: wire a **Control** node into it
+  to automate the setting. *LFO* repeats a wave between two values, *Ramp* moves from one
+  value to another over some bars, *Steps* holds a list of values in turn. Values are in
+  the setting's own units (an LFO from 1 to 7 on Mode rotate's Degree walks the modes), and
+  are read every sixteenth while playing. Synth and effect settings (cutoff, levels, mix)
+  can be automated too, as can Mixer levels for fades. Drop a control wire on empty canvas
+  to pick a node to automate.
 - To hear a scale, chord, progression or rhythm without wiring it up, click ▶ on its
   preview or click the name of its output. A scale plays as a run, chords as blocks and
   a rhythm as clicks, through a preview instrument, even while the song plays.
@@ -66,7 +79,7 @@ the path at the top left goes back up. Inside a group:
 - *Group inputs* and *Group outputs* carry its ports. Drag a wire from a node's input to
   "+ add" on *Group inputs* (or from an output to *Group outputs*) to add a port;
   double-click a port name to rename it, and click × to remove it.
-- The ◆ next to a parameter shows it on the group node, so the group can be played
+- In the inspector, the ◆ next to a setting shows it on the group node, so the group can be played
   from outside. Double-click a shown control's label on the group node to rename it.
 
 **⋯** on a group renames it, ungroups it (Ctrl+Shift+G), or saves it to the **library**;

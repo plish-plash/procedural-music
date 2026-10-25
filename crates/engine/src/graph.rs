@@ -2,14 +2,15 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::{Arc, Mutex};
 
 use pm_theory::{Chord, Meter, Note, Pitch, Scale, Ticks};
 
-use pm_synth::{ModuleDesc, RackDesc};
+use pm_synth::{ModuleDesc, ModuleKind, RackDesc};
 
 use crate::json::Json;
 use crate::nodes::{self, Inputs, NodeImpl, Sink};
-use crate::spec::{NodeSpec, ParamValue, PortType};
+use crate::spec::{NodeSpec, ParamSpec, ParamValue, PortType, PARAM_PORT};
 use crate::timeline::Timeline;
 use crate::value::Value;
 
@@ -168,8 +169,44 @@ struct CompiledNode {
     id: String,
     spec: &'static NodeSpec,
     imp: Option<Box<dyn NodeImpl>>,
-    /// For each input port: (source node index, source output index).
+    /// For each input port, then each automated parameter (see `controls`):
+    /// (source node index, source output index).
     inputs: Vec<Option<(usize, usize)>>,
+    /// Parameters driven by a Control input, in the order of their slots in `inputs`
+    /// (after the spec's inputs).
+    controls: Vec<&'static ParamSpec>,
+    /// The parameter values the node was built with, for rebuilding it with automation.
+    params: HashMap<String, ParamValue>,
+    /// The node built with automated values, by those values (see [`Graph::automated`]).
+    variants: Mutex<Vec<(Vec<Option<u64>>, Arc<dyn NodeImpl>)>>,
+}
+
+/// How many automated variants of one node are kept before starting over.
+const MAX_VARIANTS: usize = 64;
+
+impl CompiledNode {
+    /// The slot in `inputs` and the type of an input port. `param.<name>` names the
+    /// Control input of an automatable parameter; its slot is made on first use.
+    fn input_slot(&mut self, port: &str) -> Option<(usize, PortType)> {
+        if let Some(i) = self.spec.inputs.iter().position(|p| p.name == port) {
+            return Some((i, self.spec.inputs[i].ty));
+        }
+        let name = port.strip_prefix(PARAM_PORT)?;
+        let param = self
+            .spec
+            .params
+            .iter()
+            .find(|p| p.name == name && p.automatable(self.spec))?;
+        let k = match self.controls.iter().position(|c| c.name == name) {
+            Some(k) => k,
+            None => {
+                self.controls.push(param);
+                self.inputs.push(None);
+                self.controls.len() - 1
+            }
+        };
+        Some((self.spec.inputs.len() + k, PortType::Control))
+    }
 }
 
 /// A compiled graph, ready to evaluate.
@@ -187,6 +224,8 @@ struct Evaluation {
     outputs: Vec<Vec<Option<Value>>>,
     sinks: Vec<SinkOutput>,
     issues: Vec<NodeIssue>,
+    /// Automated rack module settings (see [`Graph::evaluate_window`]).
+    modules: Vec<(u64, ModuleKind)>,
 }
 
 impl Graph {
@@ -227,6 +266,9 @@ impl Graph {
                 spec,
                 imp,
                 inputs: vec![None; spec.inputs.len()],
+                controls: Vec::new(),
+                params: n.params.clone(),
+                variants: Mutex::new(Vec::new()),
             });
         }
 
@@ -242,12 +284,8 @@ impl Graph {
                 .outputs
                 .iter()
                 .position(|p| p.name == w.from_port);
-            let in_port = nodes[to]
-                .spec
-                .inputs
-                .iter()
-                .position(|p| p.name == w.to_port);
-            let (Some(op), Some(ip)) = (out_port, in_port) else {
+            let in_port = nodes[to].input_slot(&w.to_port);
+            let (Some(op), Some((ip, to_ty))) = (out_port, in_port) else {
                 issues.push(NodeIssue {
                     node: w.to_node.clone(),
                     message: format!("no port '{}'", w.to_port),
@@ -255,7 +293,6 @@ impl Graph {
                 continue;
             };
             let from_ty = nodes[from].spec.outputs[op].ty;
-            let to_ty = nodes[to].spec.inputs[ip].ty;
             if !from_ty.connects_to(to_ty) {
                 issues.push(NodeIssue {
                     node: w.to_node.clone(),
@@ -372,11 +409,24 @@ impl Graph {
             .collect();
         let mut sinks = Vec::new();
         let mut issues = Vec::new();
+        let mut modules = Vec::new();
         for &i in subset {
             let node = &self.nodes[i];
-            let Some(imp) = &node.imp else { continue };
+            let Some(base) = &node.imp else { continue };
+            // Sound nodes become rack modules: report their automated settings.
+            if base.module().is_some() && !node.controls.is_empty() {
+                match self.automated(node, &outputs, ctx.start) {
+                    Ok(Some(v)) => modules.extend(v.module().map(|k| (module_id(&node.id), k))),
+                    Ok(None) => {}
+                    Err(message) => issues.push(NodeIssue {
+                        node: node.id.clone(),
+                        message,
+                    }),
+                }
+            }
             // Effects, mixers and audio outputs only process audio, in the rack; display
             // nodes only run for previews.
+            let imp = base;
             if (!imp.is_sink()
                 && !node.spec.outputs.is_empty()
                 && node.spec.outputs.iter().all(|o| o.ty == PortType::Audio))
@@ -402,6 +452,18 @@ impl Graph {
             if missing {
                 continue;
             }
+            // With automated parameters, the node as built with their current values.
+            let variant = match self.automated(node, source, ctx.start) {
+                Ok(v) => v,
+                Err(message) => {
+                    issues.push(NodeIssue {
+                        node: node.id.clone(),
+                        message,
+                    });
+                    continue;
+                }
+            };
+            let imp: &dyn NodeImpl = variant.as_deref().unwrap_or(imp.as_ref());
             let inputs = Inputs { values };
             if imp.is_sink() {
                 if let Some(sink) = imp.sink() {
@@ -429,17 +491,69 @@ impl Graph {
             outputs,
             sinks,
             issues,
+            modules,
         }
+    }
+
+    /// The node built with the current values of its automated parameters: each
+    /// connected Control is read at tick `t` (from `source`) and snapped to the
+    /// parameter's grid. `None` when nothing automates it, so the node runs as compiled.
+    /// Variants are cached by their values.
+    fn automated(
+        &self,
+        node: &CompiledNode,
+        source: &[Vec<Option<Value>>],
+        t: Ticks,
+    ) -> Result<Option<Arc<dyn NodeImpl>>, String> {
+        if node.controls.is_empty() {
+            return Ok(None);
+        }
+        let first = node.spec.inputs.len();
+        let key: Vec<Option<u64>> = node
+            .controls
+            .iter()
+            .enumerate()
+            .map(|(k, param)| match node.inputs[first + k].and_then(|(s, o)| source[s][o].as_ref()) {
+                Some(Value::Control(c)) => Some(param.snap(c.at(t)).to_bits()),
+                _ => None,
+            })
+            .collect();
+        if key.iter().all(Option::is_none) {
+            return Ok(None);
+        }
+        let mut variants = node.variants.lock().unwrap();
+        if let Some((_, v)) = variants.iter().find(|(k, _)| *k == key) {
+            return Ok(Some(v.clone()));
+        }
+        let mut params = node.params.clone();
+        for (param, value) in node.controls.iter().zip(&key) {
+            if let Some(bits) = value {
+                params.insert(param.name.to_string(), ParamValue::Number(f64::from_bits(*bits)));
+            }
+        }
+        let built: Arc<dyn NodeImpl> = Arc::from(nodes::build(node.spec, &params)?);
+        if variants.len() >= MAX_VARIANTS {
+            variants.clear();
+        }
+        variants.push((key, built.clone()));
+        Ok(Some(built))
     }
 
     /// Notes that start in the window, grouped by output node.
     pub fn evaluate(&self, ctx: &EvalContext) -> Vec<SinkOutput> {
-        let mut sinks = self.run(ctx).sinks;
+        self.evaluate_window(ctx).0
+    }
+
+    /// Like [`Graph::evaluate`], plus the settings of rack modules whose parameters are
+    /// automated, as they are at the start of the window.
+    pub fn evaluate_window(&self, ctx: &EvalContext) -> (Vec<SinkOutput>, Vec<(u64, ModuleKind)>) {
+        let eval = self.run(ctx);
+        let mut sinks = eval.sinks;
         for s in &mut sinks {
             s.notes
                 .retain(|n| n.start >= ctx.start && n.start < ctx.end);
         }
-        sinks
+        (sinks, eval.modules)
     }
 
     /// The value on one of a node's outputs (the first when `port` is `None`).
@@ -591,6 +705,7 @@ pub(crate) fn describe(v: &Value, meter: Meter) -> String {
         }),
         Value::Rhythm(r) => format!("{r}"),
         Value::Notes(n) => describe_notes(n, meter),
+        Value::Control(c) => c.describe(meter.ticks_per_bar()),
     }
 }
 
@@ -666,6 +781,35 @@ pub(crate) fn value_view(v: &Value, meter: Meter, window: Ticks) -> Option<Json>
                 ("length", Json::Num(window as f64)),
                 ("bar", Json::Num(bar as f64)),
                 ("notes", Json::Arr(notes)),
+            ]))
+        }
+        Value::Control(c) => {
+            // Sampled finely enough to draw: 16 points a bar.
+            let n = (window / bar).max(1) * 16;
+            let points: Vec<(f64, f64)> = (0..=n)
+                .map(|k| {
+                    let t = window * k / n;
+                    (t as f64, c.at(t))
+                })
+                .collect();
+            let (lo, hi) = points
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+            Some(Json::obj(vec![
+                ("kind", Json::str("curve")),
+                ("length", Json::Num(window as f64)),
+                ("bar", Json::Num(bar as f64)),
+                ("min", Json::Num(lo)),
+                ("max", Json::Num(hi)),
+                (
+                    "points",
+                    Json::Arr(
+                        points
+                            .into_iter()
+                            .map(|(t, v)| Json::Arr(vec![Json::Num(t), Json::Num(v)]))
+                            .collect(),
+                    ),
+                ),
             ]))
         }
     }
@@ -909,6 +1053,92 @@ mod tests {
         let r = Graph::compile(&doc).report(Meter::COMMON, 1, true);
         assert_eq!(r.previews[0].1, "D Dorian · D E F G A B C");
         assert_eq!(r.previews[1].1, "F Lydian · F G A B C D E");
+    }
+
+    #[test]
+    fn controls_automate_parameters() {
+        let bar = Meter::COMMON.ticks_per_bar();
+        let doc = GraphDoc {
+            nodes: vec![
+                node("c", "chord", &[("symbol", text("C"))]),
+                node("t", "transpose", &[]),
+                node("k", "steps", &[("values", text("0 5 7"))]),
+            ],
+            wires: vec![
+                wire("c", "chord", "t", "chords"),
+                wire("k", "control", "t", "param.semitones"),
+            ],
+            ..Default::default()
+        };
+        let g = Graph::compile(&doc);
+        assert!(g.issues().is_empty(), "{:?}", g.issues());
+        // One step a bar: the chord moves up 5, then 7, then starts again.
+        let lowest = |b: u32| {
+            let ctx = EvalContext::new(b * bar, b * bar + PPQ / 4, Meter::COMMON, 0);
+            match g.output_value("t", None, &ctx).unwrap() {
+                Value::Chord(tl) => tl.at(0).value.notes()[0].step(),
+                v => panic!("{v:?}"),
+            }
+        };
+        assert_eq!([lowest(0), lowest(1), lowest(2), lowest(3)], [60, 65, 67, 60]);
+
+        // Only automatable parameters have a port; a control can't feed other inputs.
+        let mut bad = doc.clone();
+        bad.wires.push(wire("k", "control", "t", "param.nope"));
+        bad.wires.push(wire("k", "control", "t", "chords"));
+        let issues = Graph::compile(&bad).issues().to_vec();
+        assert!(issues.iter().any(|i| i.message == "no port 'param.nope'"), "{issues:?}");
+        assert!(issues.iter().any(|i| i.message == "a control can't feed a chord input"), "{issues:?}");
+
+        // The control's own view is a curve over the preview window.
+        let r = g.report(Meter::COMMON, 4, true);
+        let k = view(&r, "k");
+        assert_eq!(k.get("kind").unwrap().as_str(), Some("curve"));
+        assert_eq!(k.get("max").unwrap().as_f64(), Some(7.0));
+        assert_eq!(
+            r.previews.iter().find(|p| p.0 == "k").unwrap().1,
+            "steps 0 5 7"
+        );
+    }
+
+    #[test]
+    fn controls_automate_rack_modules() {
+        let doc = GraphDoc {
+            nodes: vec![
+                node("s", "poly_synth", &[]),
+                node(
+                    "l",
+                    "lfo",
+                    &[
+                        ("min", ParamValue::Number(200.0)),
+                        ("max", ParamValue::Number(4000.0)),
+                        ("cycle", ParamValue::Number(1.0)),
+                    ],
+                ),
+            ],
+            wires: vec![wire("l", "control", "s", "param.cutoff")],
+            ..Default::default()
+        };
+        let g = Graph::compile(&doc);
+        assert!(g.issues().is_empty(), "{:?}", g.issues());
+        let cutoff = |t: Ticks| {
+            let (_, modules) = g.evaluate_window(&EvalContext::new(t, t + 240, Meter::COMMON, 0));
+            assert_eq!(modules.len(), 1);
+            assert_eq!(modules[0].0, module_id("s"));
+            match modules[0].1 {
+                ModuleKind::Poly(p) => p.cutoff,
+                ref k => panic!("{k:?}"),
+            }
+        };
+        let bar = Meter::COMMON.ticks_per_bar();
+        assert!((cutoff(0) - 200.0).abs() < 1.0);
+        assert!((cutoff(bar / 2) - 4000.0).abs() < 1.0);
+        // Without automation, nothing is reported.
+        let plain = Graph::compile(&GraphDoc {
+            nodes: vec![node("s", "poly_synth", &[])],
+            ..Default::default()
+        });
+        assert!(plain.evaluate_window(&EvalContext::new(0, 240, Meter::COMMON, 0)).1.is_empty());
     }
 
     fn view<'a>(r: &'a CompileReport, id: &str) -> &'a Json {

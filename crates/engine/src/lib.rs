@@ -10,6 +10,7 @@
 
 pub mod api;
 mod audition;
+pub mod control;
 mod engine;
 mod graph;
 pub mod json;

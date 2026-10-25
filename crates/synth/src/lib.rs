@@ -14,7 +14,7 @@ pub mod rack;
 pub mod synth;
 pub mod wav;
 
-pub use rack::{AudioMsg, ModuleDesc, ModuleKind, Rack, RackDesc, TimedEvent};
+pub use rack::{AudioMsg, ModuleDesc, ModuleKind, Rack, RackDesc, TimedEvent, TimedSet};
 
 /// A note for an instrument. `id` pairs each note-off with its note-on; `freq` is exact
 /// (any tuning); `key` is the nearest MIDI key, used by the drum kit.

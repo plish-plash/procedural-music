@@ -104,7 +104,7 @@ pub fn notes(value: &Value, meter: Meter) -> Result<Vec<(u64, Note)>, String> {
                 }
             }
         }
-        Value::Notes(_) => {
+        Value::Notes(_) | Value::Control(_) => {
             return Err("only scales, chords and rhythms can be auditioned".into());
         }
     }

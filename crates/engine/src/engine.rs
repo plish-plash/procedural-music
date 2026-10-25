@@ -14,7 +14,7 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use pm_synth::{AudioMsg, NoteEvent, RackDesc, TimedEvent};
+use pm_synth::{AudioMsg, ModuleKind, NoteEvent, RackDesc, TimedEvent, TimedSet};
 use pm_theory::{Meter, Note, Ticks, PPQ};
 
 use crate::audition;
@@ -289,6 +289,10 @@ pub struct Engine {
     /// Messages for the audio thread, collected until [`Engine::take_audio`].
     audio: Vec<AudioMsg>,
     audio_events: Vec<TimedEvent>,
+    /// Automated module settings for the audio thread, collected like `audio_events`.
+    audio_sets: Vec<TimedSet>,
+    /// The automated settings last sent for each rack module.
+    module_state: HashMap<u64, ModuleKind>,
     next_note_id: u64,
     /// When true, slow work (counterpoint solving) finishes before evaluation returns,
     /// instead of improving in the background. For offline rendering and tests.
@@ -332,6 +336,8 @@ impl Engine {
             focus: None,
             audio: vec![AudioMsg::Tempo(110.0)],
             audio_events: Vec::new(),
+            audio_sets: Vec::new(),
+            module_state: HashMap::new(),
             next_note_id: 1,
             synchronous: false,
             quantize_edits: false,
@@ -367,6 +373,7 @@ impl Engine {
         let rack = self.rack_now.min(song.graphs.len() - 1);
         self.audio.push(AudioMsg::Rack(song.racks[rack].clone()));
         self.rack_now = rack;
+        self.module_state.clear();
         if self.playing {
             // Apply instrument changes right away (due at the next poll).
             for (port, channel, program) in song.base().programs() {
@@ -395,6 +402,28 @@ impl Engine {
             let from = self.transport.map(p).map_or(0, |(s, _)| s);
             self.transport = self.make_transport(from.min(self.song.length.saturating_sub(1)), p);
             self.end_at = None;
+        }
+    }
+
+    /// Sends the rack of one of the song's graphs. Its modules start from their own
+    /// settings, so automated ones are sent again.
+    fn push_rack(&mut self, graph: usize) {
+        self.flush_events();
+        self.audio
+            .push(AudioMsg::Rack(self.song.racks[graph].clone()));
+        self.rack_now = graph;
+        self.module_state.clear();
+    }
+
+    /// Moves queued instrument notes and settings into the message list, so messages
+    /// pushed after this keep their order relative to them.
+    fn flush_events(&mut self) {
+        if !self.audio_events.is_empty() {
+            self.audio
+                .push(AudioMsg::Events(std::mem::take(&mut self.audio_events)));
+        }
+        if !self.audio_sets.is_empty() {
+            self.audio.push(AudioMsg::Set(std::mem::take(&mut self.audio_sets)));
         }
     }
 
@@ -457,10 +486,7 @@ impl Engine {
     /// Messages for the audio thread since the last call: rack changes, tempo, instrument
     /// notes (ahead of time) and stops, in order.
     pub fn take_audio(&mut self) -> Vec<AudioMsg> {
-        if !self.audio_events.is_empty() {
-            self.audio
-                .push(AudioMsg::Events(std::mem::take(&mut self.audio_events)));
-        }
+        self.flush_events();
         std::mem::take(&mut self.audio)
     }
 
@@ -712,11 +738,10 @@ impl Engine {
         if !self.playing && self.active.is_empty() {
             return out;
         }
-        if !self.audio_events.is_empty() {
-            self.audio
-                .push(AudioMsg::Events(std::mem::take(&mut self.audio_events)));
-        }
+        self.flush_events();
         self.audio.push(AudioMsg::Stop);
+        // Automated modules keep their last settings; send them again next time.
+        self.module_state.clear();
         self.audio.push(AudioMsg::Tempo(self.bpm));
         self.playing = false;
         self.tempo.clear();
@@ -840,9 +865,7 @@ impl Engine {
             self.audio.push(AudioMsg::Tempo(bpm));
         }
         if graph != self.rack_now {
-            self.audio
-                .push(AudioMsg::Rack(self.song.racks[graph].clone()));
-            self.rack_now = graph;
+            self.push_rack(graph);
         }
         let ctx = EvalContext {
             sync: self.synchronous,
@@ -850,7 +873,15 @@ impl Engine {
             repeat,
             ..EvalContext::new(local, local + self.slice, self.meter, salt)
         };
-        let sinks = self.song.graphs[graph].evaluate(&ctx);
+        let (sinks, modules) = self.song.graphs[graph].evaluate_window(&ctx);
+        // Automated sound settings go to the rack when they change.
+        let at = self.time_of(p);
+        for (module, kind) in modules {
+            if self.module_state.get(&module) != Some(&kind) {
+                self.module_state.insert(module, kind);
+                self.audio_sets.push(TimedSet { at, module, kind });
+            }
+        }
         for mut sink in sinks {
             for n in &mut sink.notes {
                 n.start = p + (n.start - local);
@@ -1148,6 +1179,57 @@ mod tests {
             _ => None,
         });
         assert!(rack.unwrap().modules.iter().any(|m| m.id == audition::SYNTH));
+    }
+
+    #[test]
+    fn automated_sound_settings_reach_the_rack() {
+        let n = |id: &str, kind: &str, params: &[(&str, f64)]| NodeDoc {
+            id: id.into(),
+            kind: kind.into(),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), ParamValue::Number(*v)))
+                .collect(),
+        };
+        let doc = GraphDoc {
+            nodes: vec![
+                n("s", "poly_synth", &[]),
+                n("l", "lfo", &[("min", 200.0), ("max", 4000.0), ("cycle", 1.0)]),
+            ],
+            wires: vec![WireDoc {
+                from_node: "l".into(),
+                from_port: "control".into(),
+                to_node: "s".into(),
+                to_port: "param.cutoff".into(),
+            }],
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        e.set_graph(&doc);
+        e.play(0.0, 1);
+        run(&mut e, 2.0);
+        let sets: Vec<(f64, f32)> = e
+            .take_audio()
+            .into_iter()
+            .flat_map(|m| match m {
+                AudioMsg::Set(s) => s,
+                _ => Vec::new(),
+            })
+            .map(|s| match s.kind {
+                ModuleKind::Poly(p) => (s.at, p.cutoff),
+                k => panic!("{k:?}"),
+            })
+            .collect();
+        assert!(sets.len() > 8, "{sets:?}");
+        assert!(sets.windows(2).all(|w| w[0].0 < w[1].0 && w[0].1 != w[1].1));
+        let (lo, hi) = sets.iter().fold((f32::MAX, 0f32), |(lo, hi), s| (lo.min(s.1), hi.max(s.1)));
+        assert!(lo < 400.0 && hi > 3500.0, "{lo} {hi}");
+        // After a stop, playing again sends the settings again.
+        e.stop();
+        e.take_audio();
+        e.play(10.0, 2);
+        run(&mut e, 10.2);
+        assert!(e.take_audio().iter().any(|m| matches!(m, AudioMsg::Set(_))));
     }
 
     #[test]

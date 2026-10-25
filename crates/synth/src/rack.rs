@@ -26,8 +26,16 @@ pub struct TimedEvent {
     pub event: NoteEvent,
 }
 
+/// New settings for one module, at a time in seconds on the shared clock (automation).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimedSet {
+    pub at: f64,
+    pub module: u64,
+    pub kind: ModuleKind,
+}
+
 /// What a module is and its settings.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ModuleKind {
     Poly(SynthParams),
     Mono(SynthParams, MonoParams),
@@ -77,6 +85,9 @@ pub enum AudioMsg {
     Stop,
     /// Drop queued events for these modules and release their voices.
     Silence(Vec<u64>),
+    /// Settings changes to apply at their times, in time order (automation). A module
+    /// whose kind no longer matches ignores them.
+    Set(Vec<TimedSet>),
 }
 
 enum Proc {
@@ -172,6 +183,7 @@ pub struct Rack {
     order: Vec<usize>,
     bufs: Vec<Stereo>,
     queue: VecDeque<TimedEvent>,
+    sets: VecDeque<TimedSet>,
     scratch: Vec<f32>,
 }
 
@@ -184,6 +196,7 @@ impl Rack {
             order: Vec::new(),
             bufs: Vec::new(),
             queue: VecDeque::with_capacity(1024),
+            sets: VecDeque::with_capacity(256),
             scratch: vec![0.0; BLOCK],
         }
     }
@@ -222,8 +235,17 @@ impl Rack {
                         .sort_by(|a, b| a.at.total_cmp(&b.at));
                 }
             }
+            AudioMsg::Set(sets) => {
+                self.sets.extend(sets);
+                if !self.sets.iter().zip(self.sets.iter().skip(1)).all(|(a, b)| a.at <= b.at) {
+                    self.sets
+                        .make_contiguous()
+                        .sort_by(|a, b| a.at.total_cmp(&b.at));
+                }
+            }
             AudioMsg::Stop => {
                 self.queue.clear();
+                self.sets.clear();
                 for s in self.slots.iter_mut() {
                     s.proc.release_all();
                 }
@@ -304,6 +326,13 @@ impl Rack {
         while pos < frames {
             let n = BLOCK.min(frames - pos);
             let block_end = start + (pos + n) as f64 / self.sr as f64;
+            while self.sets.front().is_some_and(|s| s.at < block_end) {
+                let s = self.sets.pop_front().expect("peeked");
+                let d = discriminant(&s.kind);
+                if let Some(slot) = self.slots.iter_mut().find(|x| x.id == s.module && x.kind == d) {
+                    slot.proc.update(&s.kind);
+                }
+            }
             while self.queue.front().is_some_and(|e| e.at < block_end) {
                 let e = self.queue.pop_front().expect("peeked");
                 if let Some(slot) = self.slots.iter_mut().find(|s| s.id == e.module) {
@@ -495,6 +524,28 @@ mod tests {
         rack.render(0.0, &mut out);
         rack.handle(AudioMsg::Stop);
         assert_eq!(rack.queued_events(), 0);
+    }
+
+    #[test]
+    fn timed_sets_change_settings_on_time() {
+        let mut rack = Rack::new(SR);
+        rack.handle(AudioMsg::Rack(desc()));
+        let quiet = |at| TimedSet {
+            at,
+            module: 3,
+            kind: ModuleKind::Output { level: 0.0 },
+        };
+        rack.handle(AudioMsg::Events(vec![on(0.0, 1)]));
+        rack.handle(AudioMsg::Set(vec![quiet(0.1)]));
+        let mut out = vec![0.0; 2 * 9600];
+        rack.render(0.0, &mut out);
+        // Sound before 0.1 s, silence after.
+        assert!(out[..2 * 4000].iter().any(|x| x.abs() > 1e-3));
+        assert!(out[2 * 4900..].iter().all(|x| *x == 0.0));
+        // A set for a module of another kind is ignored; Stop drops pending sets.
+        rack.handle(AudioMsg::Set(vec![TimedSet { at: 1.0, module: 1, kind: ModuleKind::Output { level: 1.0 } }, quiet(5.0)]));
+        rack.handle(AudioMsg::Stop);
+        assert!(rack.sets.is_empty());
     }
 
     #[test]

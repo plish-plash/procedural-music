@@ -1,6 +1,7 @@
 import * as api from './api.js';
 import { Editor, isTyping, el } from './editor.js';
 import { EXAMPLES } from './examples.js';
+import { Inspector } from './inspector.js';
 import { songTemplate } from './templates.js';
 import { Timeline } from './timeline.js';
 
@@ -9,6 +10,7 @@ const AUTOSAVE_KEY = 'pm.autosave';
 const MODE_KEY = 'pm.mode';
 
 let editor;
+let inspector;
 let timeline;
 let filePath = null;
 let dirty = false;
@@ -326,6 +328,8 @@ async function setMode(m) {
   } catch {
     /* ignore */
   }
+  // Perform gives the canvas the room; Compose brings back the inspector as it was.
+  inspector.setCollapsed(m === 'perform' || inspector.savedCollapsed(), false);
   if (m === 'perform') {
     // Perform loops one section at a time; cue the next one with the buttons or 1-9.
     const start = editor.focus ?? (status?.section ?? 0);
@@ -463,6 +467,8 @@ async function init() {
     onAudition: audition,
     onProbe: probe,
   });
+  inspector = new Inspector({ root: $('inspector'), editor, onLibrarySave: saveToLibrary });
+  editor.inspector = inspector;
   timeline = new Timeline({
     root: $('timeline'),
     getDoc: () => editor.doc,
@@ -538,6 +544,8 @@ async function init() {
     } else if (e.key === ' ' && !isTyping(e) && $('add-menu').hidden) {
       e.preventDefault();
       togglePlay();
+    } else if (!mod && key === 'i' && !isTyping(e) && $('add-menu').hidden) {
+      inspector.setCollapsed(!inspector.collapsed, true);
     } else if (mode === 'perform' && !mod && !isTyping(e) && /^[1-9]$/.test(e.key)) {
       const i = Number(e.key) - 1;
       if (i < editor.doc.arrangement.sections.length) cue(i);

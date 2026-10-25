@@ -11,7 +11,12 @@ pub enum PortType {
     Notes,
     /// A stereo audio stream inside the built-in sound engine.
     Audio,
+    /// A number over time, which drives a parameter.
+    Control,
 }
+
+/// Prefix of the input port that automates a parameter: `param.cutoff`.
+pub const PARAM_PORT: &str = "param.";
 
 impl PortType {
     pub fn name(self) -> &'static str {
@@ -21,6 +26,7 @@ impl PortType {
             PortType::Rhythm => "rhythm",
             PortType::Notes => "notes",
             PortType::Audio => "audio",
+            PortType::Control => "control",
         }
     }
 
@@ -31,6 +37,7 @@ impl PortType {
             "rhythm" => PortType::Rhythm,
             "notes" => PortType::Notes,
             "audio" => PortType::Audio,
+            "control" => PortType::Control,
             _ => return None,
         })
     }
@@ -40,13 +47,14 @@ impl PortType {
         self == to || (self == PortType::Chord && to == PortType::Scale)
     }
 
-    pub fn all() -> [PortType; 5] {
+    pub fn all() -> [PortType; 6] {
         [
             PortType::Scale,
             PortType::Chord,
             PortType::Rhythm,
             PortType::Notes,
             PortType::Audio,
+            PortType::Control,
         ]
     }
 }
@@ -111,6 +119,31 @@ pub struct ParamSpec {
 }
 
 impl ParamSpec {
+    /// Whether a Control input can drive this parameter of `node`: numbers, except on
+    /// nodes that keep state between evaluations (the counterpoint solver, piano rolls)
+    /// and MIDI outputs, whose channel and program aren't meant to move.
+    pub fn automatable(&self, node: &NodeSpec) -> bool {
+        matches!(self.kind, ParamKind::Number { .. } | ParamKind::LogNumber { .. })
+            && !matches!(node.kind, "counterpoint" | "piano_roll" | "midi_out")
+    }
+
+    /// `value` snapped to this parameter's grid (its step, or three significant figures
+    /// on a log scale) and range, so automation builds a bounded number of node variants.
+    pub fn snap(&self, value: f64) -> f64 {
+        match self.kind {
+            ParamKind::Number { min, max, step, .. } => {
+                let v = if step > 0.0 { (value / step).round() * step } else { value };
+                v.clamp(min, max)
+            }
+            ParamKind::LogNumber { min, max, .. } => {
+                let v = value.clamp(min, max);
+                let m = 10f64.powi(2 - v.abs().log10().floor() as i32);
+                (v * m).round() / m
+            }
+            _ => value,
+        }
+    }
+
     pub fn default_value(&self) -> ParamValue {
         match self.kind {
             ParamKind::Number { default, .. } | ParamKind::LogNumber { default, .. } => {

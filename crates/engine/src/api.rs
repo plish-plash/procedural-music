@@ -213,6 +213,9 @@ pub fn specs_json() -> Json {
                 .iter()
                 .map(|p| {
                     let mut f = vec![("name", Json::str(p.name)), ("label", Json::str(p.label))];
+                    if p.automatable(s) {
+                        f.push(("automatable", Json::Bool(true)));
+                    }
                     match p.kind {
                         ParamKind::Number {
                             min,

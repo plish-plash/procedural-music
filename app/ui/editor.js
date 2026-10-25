@@ -9,35 +9,24 @@
 // inputs: [{ name, type }], outputs: [...], exposed: ['<node>.<param>'], io: { in: {x, y}, out: {x, y} } }.
 // Inside it, the pseudo-nodes '@in' and '@out' carry the group's ports. Nodes inside groups
 // are addressed by path ('g1/n3'), which is also how the engine reports on them.
+//
+// Nodes are compact: their settings live in the inspector. A node's `pins: { preview,
+// params: [name] }` choose what also shows on the node; see `previewPinned`. A pinned
+// automatable parameter gets an input port named `param.<name>` that a Control can drive.
 
-const SVG = 'http://www.w3.org/2000/svg';
+import { el, svg } from './dom.js';
+import { renderCurve, renderKeys, renderPlain, renderRoll, renderStaff, renderSteps, showPlayhead } from './views.js';
+
+export { el, svg };
+
 const WIDE = new Set(['progression', 'voice', 'voice_lead', 'drop', 'invert', 'play_chords', 'transpose', 'chord',
   'switch_notes', 'switch_rhythm', 'switch_chord', 'switch_scale']);
 const XWIDE = new Set(['counterpoint', 'piano_roll']);
-// Voice colours for piano rolls: soprano, alto, tenor, bass, then extra voices.
-const VOICE_COLOR = ['#ff8a65', '#ffd54f', '#81c784', '#64b5f6', '#ba68c8', '#4dd0e1', '#f06292', '#aed581'];
 const IN = '@in';
 const OUT = '@out';
+export const PARAM_PORT = 'param.';
 
-export function el(tag, attrs = {}, ...children) {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (k === 'class') e.className = v;
-    else if (k === 'dataset') Object.assign(e.dataset, v);
-    else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
-    else if (v !== undefined && v !== null) e.setAttribute(k, v);
-  }
-  for (const c of children) if (c != null) e.append(c);
-  return e;
-}
-
-export function svg(tag, attrs = {}) {
-  const e = document.createElementNS(SVG, tag);
-  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
-  return e;
-}
-
-const TYPE_COLOR = { scale: '#40d2be', chord: '#f5b446', rhythm: '#ff7aa8', notes: '#6e96ff', audio: '#b8e06a', any: '#8a93a3' };
+const TYPE_COLOR = { scale: '#40d2be', chord: '#f5b446', rhythm: '#ff7aa8', notes: '#6e96ff', audio: '#b8e06a', control: '#b48cff', any: '#8a93a3' };
 // Output types that can be auditioned with a click.
 const AUDIBLE = new Set(['scale', 'chord', 'rhythm']);
 
@@ -50,6 +39,10 @@ export function emptyGraph() {
 function normalizeNodes(nodes) {
   return (nodes ?? []).map((n) => {
     const out = { id: String(n.id), type: n.type, x: n.x ?? 0, y: n.y ?? 0, params: { ...(n.params ?? {}) } };
+    if (n.pins) {
+      out.pins = { params: [...(n.pins.params ?? [])] };
+      if (typeof n.pins.preview === 'boolean') out.pins.preview = n.pins.preview;
+    }
     if (n.type === 'group') {
       out.title = n.title ?? 'Group';
       out.graph = normalizeGraph(n.graph);
@@ -125,6 +118,7 @@ export class Editor {
     this.drag = null;
     this.menu = null;
     this.popup = null;
+    this.inspector = null; // set by the app (see inspector.js)
     this.bind();
     this.applyView();
   }
@@ -584,12 +578,66 @@ export class Editor {
     this.changed(true);
   }
 
+  // ---- Pins ------------------------------------------------------------------------
+
+  /**
+   * Whether a node shows its preview on its face: its own choice, or by default for
+   * sources (no inputs: Scale, Progression, Pattern, LFO…), Counterpoint and analysis nodes.
+   */
+  previewPinned(n, spec = this.specFor(n)) {
+    if (!spec || n.type === 'group' || n.type === IN || n.type === OUT) return false;
+    if (typeof n.pins?.preview === 'boolean') return n.pins.preview;
+    if (n.type === 'counterpoint' || spec.category === 'Analysis') return true;
+    return spec.outputs.length > 0 && spec.inputs.length === 0;
+  }
+
+  /** The parameters pinned to a node's face (only automatable ones can be). */
+  pinnedParams(n, spec = this.specFor(n)) {
+    const names = n.pins?.params ?? [];
+    return (spec?.params ?? []).filter((p) => p.automatable && names.includes(p.name));
+  }
+
+  togglePreviewPin(n) {
+    n.pins = { params: [], ...n.pins, preview: !this.previewPinned(n) };
+    this.rerenderNode(n.id);
+    this.changed(false);
+  }
+
+  /** Pins or unpins a parameter; unpinning also removes the wire automating it. */
+  toggleParamPin(n, name) {
+    const pins = (n.pins ??= { params: [] });
+    pins.params ??= [];
+    const i = pins.params.indexOf(name);
+    let graph = false;
+    if (i >= 0) {
+      pins.params.splice(i, 1);
+      const before = this.g.wires.length;
+      this.g.wires = this.g.wires.filter((w) => !(w.to.node === n.id && w.to.port === PARAM_PORT + name));
+      graph = this.g.wires.length !== before;
+    } else {
+      pins.params.push(name);
+    }
+    this.rerenderNode(n.id);
+    requestAnimationFrame(() => this.updateWires());
+    this.changed(graph);
+  }
+
+  /** The wire automating one of a node's parameters, if any. */
+  paramWire(id, name) {
+    return this.g.wires.find((w) => w.to.node === id && w.to.port === PARAM_PORT + name) ?? null;
+  }
+
   renameGroup(n) {
     const answer = window.prompt('Group name (also the part name in MIDI exports)', n.title);
     if (answer == null || !answer.trim()) return;
     n.title = answer.trim();
     this.rerenderNode(n.id);
     this.changed(true);
+  }
+
+  /** Redraws the inspector (after the selection or a node's structure changes). */
+  inspect() {
+    this.inspector?.render();
   }
 
   changed(graph) {
@@ -613,6 +661,7 @@ export class Editor {
     this.sectionEdit = !!on && this.section() != null;
     this.canvas.classList.toggle('section-edit', this.sectionEdit);
     this.onSectionMode?.(this.sectionEdit);
+    this.inspect();
   }
 
   paramValue(owner, flat, name, def) {
@@ -683,6 +732,7 @@ export class Editor {
     this.canvas.classList.toggle('in-group', this.path.length > 0);
     this.canvas.classList.toggle('section-edit', this.sectionEdit);
     if (this.report) this.setReport(this.report);
+    this.inspect();
     // Ports need layout before wires can find them.
     requestAnimationFrame(() => this.updateWires());
   }
@@ -693,6 +743,7 @@ export class Editor {
     if (!n || !old) return;
     old.replaceWith(this.renderNode(n));
     if (this.report) this.setReport(this.report);
+    if (this.selection.has(id)) this.inspect();
   }
 
   renderNode(n) {
@@ -704,17 +755,23 @@ export class Editor {
     }
     const ins = el('div', { class: 'col' }, ...spec.inputs.map((p) => this.renderPort(n, p, 'in')));
     const outs = el('div', { class: 'col' }, ...spec.outputs.map((p) => this.renderPort(n, p, 'out')));
-    const params = el('div', { class: 'node-params' }, ...spec.params.map((p) => this.renderParam(n, p)));
     const isGroup = n.type === 'group';
     const isIo = n.type === IN || n.type === OUT;
+    // A node's face: its ports, pinned parameters and pinned preview. A group shows the
+    // controls exposed from inside it.
+    const showView = this.previewPinned(n, spec);
+    const pinned = isGroup || isIo ? [] : this.pinnedParams(n, spec);
     const classes = ['node'];
-    if (WIDE.has(n.type)) classes.push('wide');
-    if (XWIDE.has(n.type)) classes.push('xwide');
+    if (showView) classes.push('has-view');
+    if (showView && WIDE.has(n.type)) classes.push('wide');
+    if (showView && XWIDE.has(n.type)) classes.push('xwide');
+    if (pinned.length) classes.push('has-pins');
     if (isGroup) classes.push('group-node');
     if (isIo) classes.push('io-node');
     if (this.selection.has(n.id)) classes.push('selected');
     const head = el('div', { class: 'node-head', title: spec.help },
       el('span', { class: 'title' }, spec.title),
+      el('span', { class: 'issue-mark' }, '!'),
       isGroup
         ? el('span', { class: 'head-buttons' },
           el('button', { class: 'mini', title: 'Open the group (or double-click its header)', onclick: () => this.enter(n.id) }, 'Open'),
@@ -733,12 +790,37 @@ export class Editor {
     },
     head,
     (spec.inputs.length || spec.outputs.length) ? el('div', { class: 'node-ports' }, ins, outs) : null,
-    el('div', { class: 'node-view' }),
-    spec.params.length ? params : null,
-    isGroup ? el('div', { class: 'group-info' }) : null,
-    el('pre', { class: 'node-preview' }),
-    el('div', { class: 'node-issue' }));
+    pinned.length ? el('div', { class: 'node-pins' }, ...pinned.map((p) => this.renderPinnedParam(n, p))) : null,
+    isGroup && spec.params.length ? el('div', { class: 'node-params' }, ...spec.params.map((p) => this.renderParam(n, p))) : null,
+    showView ? el('div', { class: 'node-view' }) : null,
+    isGroup ? el('div', { class: 'group-info' }) : null);
     return node;
+  }
+
+  /** A pinned parameter on a node's face, with the input port that can automate it. */
+  renderPinnedParam(n, p) {
+    const port = PARAM_PORT + p.name;
+    const wire = this.paramWire(n.id, p.name);
+    const row = el('div', {
+      class: 'port in param-port',
+      dataset: { port, type: 'control', dir: 'in', wired: wire ? '1' : '' },
+      title: wire ? `${p.label} follows ${this.sourceTitle(wire)}` : `${p.label} · wire a control here to automate it`,
+    }, el('span', { class: 'dot' }));
+    row.append(wire ? this.renderAutomated(p, wire) : this.renderParam(n, p, { face: true }));
+    return row;
+  }
+
+  /** In place of a parameter's control: where its automation comes from. */
+  renderAutomated(p, wire) {
+    return el('div', { class: 'param automated' },
+      el('span', { class: 'pname' }, p.label),
+      el('span', { class: 'auto-src' }, `← ${this.sourceTitle(wire)}`));
+  }
+
+  /** The title of the node a wire comes from. */
+  sourceTitle(w) {
+    const n = this.node(w.from.node);
+    return n?.type === 'group' ? n.title : this.specFor(n)?.title ?? w.from.node;
   }
 
   groupMenu(n, e) {
@@ -793,15 +875,26 @@ export class Editor {
     return port;
   }
 
-  renderParam(n, p) {
+  /**
+   * A parameter's control. The same parameter can show in several places (the inspector,
+   * a node face, a group node); an edit in one updates the others in place. `face`: on a
+   * node face, which leaves out the "show on group" toggle.
+   */
+  renderParam(n, p, { face = false } = {}) {
     const t = p.target ?? { owner: n, name: p.name, flat: this.flat(n.id) };
     const { value, over } = this.paramValue(t.owner, t.flat, t.name, p.default);
+    const key = `${t.flat}|${t.name}`;
     let label;
     const set = (v) => {
       this.setParam(t.owner, t.flat, t.name, v);
       if (this.sectionEdit) label?.classList.add('overridden');
+      for (const other of document.querySelectorAll(`label.param[data-key="${CSS.escape(key)}"]`)) {
+        if (other !== label) other.setValue?.(v);
+      }
     };
     let control;
+    // Shows a value set elsewhere.
+    let update = () => {};
     switch (p.kind) {
       case 'number': {
         const steps = (p.max - p.min) / p.step;
@@ -813,9 +906,12 @@ export class Editor {
             set(Number(range.value));
           });
           control = el('div', { class: 'slider' }, range, out);
+          update = (v) => { range.value = v; out.textContent = fmt(v); };
         } else {
-          control = el('input', { type: 'number', min: p.min, max: p.max, step: p.step, value });
-          control.addEventListener('change', () => set(Number(control.value)));
+          const box = el('input', { type: 'number', min: p.min, max: p.max, step: p.step, value });
+          box.addEventListener('change', () => set(Number(box.value)));
+          control = box;
+          update = (v) => { box.value = v; };
         }
         break;
       }
@@ -831,35 +927,44 @@ export class Editor {
           set(v);
         });
         control = el('div', { class: 'slider' }, range, out);
+        update = (v) => { range.value = toPos(v); out.textContent = fmtLog(v); };
         break;
       }
       case 'text': {
-        control = el('input', { type: 'text', value, spellcheck: 'false' });
+        const box = el('input', { type: 'text', value, spellcheck: 'false' });
         let timer;
-        control.addEventListener('input', () => {
+        box.addEventListener('input', () => {
           clearTimeout(timer);
-          timer = setTimeout(() => set(control.value), 250);
+          timer = setTimeout(() => set(box.value), 250);
         });
-        control.addEventListener('keydown', (e) => { if (e.key === 'Enter') control.blur(); });
-        control.addEventListener('change', () => { clearTimeout(timer); set(control.value); });
+        box.addEventListener('keydown', (e) => { if (e.key === 'Enter') box.blur(); });
+        box.addEventListener('change', () => { clearTimeout(timer); set(box.value); });
+        control = box;
+        update = (v) => { if (document.activeElement !== box) box.value = v; };
         break;
       }
       case 'choice': {
-        control = el('select', {}, ...p.options.map((o) => el('option', { value: o }, o)));
-        control.value = value;
-        control.addEventListener('change', () => set(control.value));
+        const select = el('select', {}, ...p.options.map((o) => el('option', { value: o }, o)));
+        select.value = value;
+        select.addEventListener('change', () => set(select.value));
+        control = select;
+        update = (v) => { select.value = v; };
         break;
       }
       case 'bool': {
-        control = el('input', { type: 'checkbox' });
-        control.checked = !!value;
-        control.addEventListener('change', () => set(control.checked));
+        const box = el('input', { type: 'checkbox' });
+        box.checked = !!value;
+        box.addEventListener('change', () => set(box.checked));
+        control = box;
+        update = (v) => { box.checked = !!v; };
         break;
       }
       case 'midi_port': {
-        control = el('select', { class: 'midi-port' });
-        this.fillPortSelect(control, value);
-        control.addEventListener('change', () => set(control.value));
+        const select = el('select', { class: 'midi-port' });
+        this.fillPortSelect(select, value);
+        select.addEventListener('change', () => set(select.value));
+        control = select;
+        update = (v) => this.fillPortSelect(select, v);
         break;
       }
       default:
@@ -880,7 +985,8 @@ export class Editor {
       });
       name.title = `${p.label} · double-click to rename`;
     }
-    label = el('label', { class: `param${over ? ' overridden' : ''}`, title: p.label }, name, control);
+    label = el('label', { class: `param${over ? ' overridden' : ''}`, title: p.label, dataset: { key } }, name, control);
+    label.setValue = update;
     if (over) {
       label.title = `${p.label}: set for ${this.section().name} only. Click the dot to use the song value.`;
       name.prepend(el('button', {
@@ -888,8 +994,8 @@ export class Editor {
         onclick: (e) => { e.preventDefault(); e.stopPropagation(); this.clearOverride(t.flat, t.name); },
       }));
     }
-    // Inside a group, a pin shows the parameter on the group node.
-    if (this.path.length && n.type !== IN && n.type !== OUT) {
+    // Inside a group, ◆ shows the parameter on the group node.
+    if (!face && this.path.length && n.type !== IN && n.type !== OUT) {
       const key = `${n.id}.${p.name}`;
       const pinned = (this.g.exposed ?? []).includes(key);
       name.prepend(el('button', {
@@ -911,57 +1017,70 @@ export class Editor {
 
   setMidiPorts(ports) {
     this.midiPorts = ports;
-    for (const select of this.nodesEl.querySelectorAll('select.midi-port')) this.fillPortSelect(select, select.value);
+    for (const select of document.querySelectorAll('select.midi-port')) this.fillPortSelect(select, select.value);
   }
 
   /** Shows the engine's previews and issues on the nodes. */
   setReport(report) {
     this.report = report;
     this.probe.cache.clear();
-    const issues = {};
-    for (const i of report.issues ?? []) (issues[i.node] ??= []).push(i.message);
     for (const n of this.allNodes()) {
       const node = this.nodeEl(n.id);
       if (!node) continue;
-      const flat = this.flat(n.id);
-      const pre = node.querySelector('.node-preview');
-      const issue = node.querySelector('.node-issue');
-      const data = report.views?.[flat];
-      let mine = issues[flat] ?? [];
-      if (n.type === 'group') {
-        // Problems inside the group show on it, with the inner node named.
-        const inside = Object.entries(issues).filter(([k]) => k.startsWith(`${flat}/`)).flatMap(([, v]) => v);
-        if (inside.length) mine = [`${inside.length} problem${inside.length === 1 ? '' : 's'} inside: ${inside[0]}`];
-        const info = node.querySelector('.group-info');
-        if (info) {
-          const count = countNodes(n.graph);
-          const over = this.overridesUnder(flat);
-          info.textContent = `${count} node${count === 1 ? '' : 's'} inside${over ? ` · ${over} set for ${this.section().name}` : ''}`;
-        }
-      }
-      // A node with a drawn view shows its text preview on hover instead.
-      const text = report.previews?.[flat] ?? '';
-      if (pre) pre.textContent = data ? '' : text;
-      if (issue) issue.textContent = mine.join('\n');
+      const mine = this.issuesFor(n);
       node.classList.toggle('has-issue', mine.length > 0);
+      const mark = node.querySelector('.issue-mark');
+      if (mark) mark.title = mine.join('\n');
+      const info = node.querySelector('.group-info');
+      if (info) info.textContent = this.groupInfo(n);
       const view = node.querySelector('.node-view');
-      if (view) {
-        view.replaceChildren(...(data ? this.renderView(flat, data) : []));
-        view.title = data && data.kind !== 'roll' ? text : '';
-        if (data?.kind === 'keys' || data?.kind === 'steps') {
-          view.append(el('button', {
-            class: 'audition', title: 'Hear it (or click the output\'s name)',
-            onclick: (e) => { e.stopPropagation(); this.audition(n.id, null); },
-          }, '▶'));
-        }
-      }
+      if (view) this.fillView(view, n, { text: true });
     }
     this.lastTick = null;
+    this.inspector?.refresh();
+  }
+
+  /** Problems with a node; for a group, those inside it (with the first one named). */
+  issuesFor(n) {
+    const flat = this.flat(n.id);
+    const all = this.report?.issues ?? [];
+    if (n.type === 'group') {
+      const inside = all.filter((i) => i.node.startsWith(`${flat}/`)).map((i) => i.message);
+      return inside.length ? [`${inside.length} problem${inside.length === 1 ? '' : 's'} inside: ${inside[0]}`] : [];
+    }
+    return all.filter((i) => i.node === flat).map((i) => i.message);
+  }
+
+  /** "12 nodes inside · 3 set for B" */
+  groupInfo(n) {
+    const count = countNodes(n.graph);
+    const over = this.overridesUnder(this.flat(n.id));
+    return `${count} node${count === 1 ? '' : 's'} inside${over ? ` · ${over} set for ${this.section().name}` : ''}`;
+  }
+
+  /**
+   * Draws a node's preview into `container`: its view, with ▶ for what can be heard.
+   * With `text`, a node with nothing to draw shows its text preview instead.
+   */
+  fillView(container, n, { text = false } = {}) {
+    const flat = this.flat(n.id);
+    const data = this.report?.views?.[flat];
+    const preview = this.report?.previews?.[flat] ?? '';
+    const parts = data ? this.renderView(flat, data) : text && preview ? [el('pre', { class: 'view-text' }, preview)] : [];
+    container.replaceChildren(...parts);
+    container.title = data && data.kind !== 'roll' ? preview : '';
+    if (data?.kind === 'keys' || data?.kind === 'steps') {
+      container.append(el('button', {
+        class: 'audition', title: 'Hear it (or click the output\'s name)',
+        onclick: (e) => { e.stopPropagation(); this.audition(n.id, null); },
+      }, '▶'));
+    }
   }
 
   renderView(flat, data) {
     if (data.kind === 'keys') return [renderKeys(data)];
     if (data.kind === 'steps') return [renderSteps(data)];
+    if (data.kind === 'curve') return [renderCurve(data)];
     if (data.kind !== 'roll') return [];
     if (data.compact) return renderRoll(data);
     const mode = this.rollMode[flat] ?? 'roll';
@@ -991,20 +1110,9 @@ export class Editor {
   setPlayhead(tick) {
     if (tick === this.lastTick) return;
     this.lastTick = tick;
-    const all = (sel) => [...this.nodesEl.querySelectorAll(sel), ...this.probe.el.querySelectorAll(sel)];
-    for (const preview of all('[data-preview]')) preview.showAt?.(tick);
-    for (const line of all('.roll-playhead')) {
-      const length = Number(line.dataset.length);
-      const left = Number(line.dataset.left ?? ROLL.left);
-      if (tick == null || !length) {
-        line.setAttribute('visibility', 'hidden');
-        continue;
-      }
-      const x = left + ((tick % length) / length) * (ROLL.width - left);
-      line.setAttribute('x1', x);
-      line.setAttribute('x2', x);
-      line.setAttribute('visibility', 'visible');
-    }
+    showPlayhead(this.nodesEl, tick);
+    showPlayhead(this.probe.el, tick);
+    if (this.inspector) showPlayhead(this.inspector.root, tick);
   }
 
   // ---- Wire probe ------------------------------------------------------------------
@@ -1066,8 +1174,7 @@ export class Editor {
     const head = el('div', { class: 'probe-head' },
       el('span', { class: 'swatch', style: `background:${TYPE_COLOR[type] ?? '#888'}` }),
       `${name(w.from.node, w.from.port)} → ${name(w.to.node, w.to.port)}`);
-    const v = result.view;
-    const view = v?.kind === 'keys' ? [renderKeys(v)] : v?.kind === 'steps' ? [renderSteps(v)] : v?.kind === 'roll' ? renderRoll(v) : [];
+    const view = renderPlain(result.view);
     const text = result.error ? el('div', { class: 'probe-error' }, result.error) : el('pre', { class: 'probe-text' }, result.text);
     this.probe.el.replaceChildren(head, ...view, text);
     this.probe.el.hidden = false;
@@ -1112,6 +1219,7 @@ export class Editor {
   }
 
   portType(nodeId, dir, port) {
+    if (dir === 'in' && port.startsWith(PARAM_PORT)) return 'control';
     const spec = this.specFor(this.node(nodeId));
     const list = dir === 'in' ? spec?.inputs : spec?.outputs;
     return list?.find((p) => p.name === port)?.type;
@@ -1162,6 +1270,17 @@ export class Editor {
       const id = p.closest('.node').dataset.id;
       p.classList.toggle('connected', connected.has(`${id}/${p.dataset.port}`));
     }
+    // A pinned parameter shows its control, or where its automation comes from, so redraw
+    // nodes whose parameter wiring changed.
+    const stale = new Set();
+    for (const p of this.nodesEl.querySelectorAll('.param-port')) {
+      const id = p.closest('.node').dataset.id;
+      if (!!p.dataset.wired !== !!this.paramWire(id, p.dataset.port.slice(PARAM_PORT.length))) stale.add(id);
+    }
+    if (stale.size && !this.drag) {
+      for (const id of stale) this.rerenderNode(id);
+      requestAnimationFrame(() => this.updateWires());
+    }
   }
 
   // ---- View ------------------------------------------------------------------------
@@ -1205,6 +1324,7 @@ export class Editor {
     this.selectedWire = null;
     for (const e of this.nodesEl.querySelectorAll('.node')) e.classList.toggle('selected', this.selection.has(e.dataset.id));
     this.updateWires();
+    this.inspect();
   }
 
   // ---- Interaction ---------------------------------------------------------------------
@@ -1451,6 +1571,11 @@ export class Editor {
   /** The port on `spec` a pending wire should attach to, or null. */
   pendingPort(spec, pending) {
     if (!pending) return null;
+    if (pending.dir === 'out' && pending.type === 'control') {
+      // A control goes to the first parameter it can automate (pinning it).
+      const p = (spec.params ?? []).find((x) => x.automatable);
+      return p ? { name: PARAM_PORT + p.name, type: 'control', pin: p.name } : null;
+    }
     if (pending.dir === 'out') return spec.inputs.find((p) => this.canConnect(pending.type, p.type)) ?? null;
     return spec.outputs.find((p) => this.canConnect(p.type, pending.type)) ?? null;
   }
@@ -1527,6 +1652,10 @@ export class Editor {
     const x = pending?.dir === 'in' ? at.x - 250 : at.x;
     const n = spec.kind === 'library' ? this.addLibraryGroup(spec.entry, x, at.y - 20) : this.addNode(spec.kind, x, at.y - 20);
     const port = this.pendingPort(this.specFor(n), pending);
+    if (port?.pin) {
+      n.pins = { params: [port.pin] };
+      this.rerenderNode(n.id);
+    }
     if (port) {
       requestAnimationFrame(() => {
         if (pending.dir === 'out') this.connect({ node: pending.node, port: pending.port }, { node: n.id, port: port.name });
@@ -1565,332 +1694,3 @@ function fmtLog(v) {
   return String(round3(v));
 }
 
-// ---- Piano roll and staff -----------------------------------------------------------
-
-const ROLL = { width: 360, left: 26, row: 8, min: 110, max: 230 };
-const ROLL_COMPACT = { ...ROLL, row: 5, min: 54, max: 96 };
-
-function summary(minor, broken) {
-  const parts = [];
-  if (broken) parts.push(`${broken} rule${broken === 1 ? '' : 's'} broken`);
-  if (minor) parts.push(`${minor} minor issue${minor === 1 ? '' : 's'}`);
-  return parts.length ? parts.join(', ') : 'Follows every rule';
-}
-
-/** The summary line above a roll or staff. */
-function viewHead(v) {
-  const head = el('div', { class: 'roll-head' });
-  const issues = v.marks ?? [];
-  if (v.cost !== undefined) {
-    const hard = issues.filter((m) => m.hard).length;
-    head.append(
-      el('span', {}, summary(issues.length - hard, hard)),
-      el('span', { class: 'roll-cost', title: 'Total cost: lower is better' }, `cost ${v.cost}`),
-    );
-    if (v.pending) head.append(el('span', { class: 'roll-pending' }, 'refining…'));
-    head.classList.toggle('bad', issues.some((m) => m.hard));
-  } else {
-    head.append(el('span', { class: 'roll-cost' }, ''));
-  }
-  return head;
-}
-
-/** Per-note marks and tooltip text, shared by the roll and the staff. */
-function noteInfo(v) {
-  const notes = v.notes ?? [];
-  const issues = v.marks ?? [];
-  const marksFor = new Map();
-  for (const m of issues) {
-    for (const i of [m.n, m.o]) if (i != null) (marksFor.get(i) ?? marksFor.set(i, []).get(i)).push(m);
-  }
-  const alts = new Map((v.alts ?? []).map((a) => [a.n, a]));
-  return notes.map((n, i) => {
-    const marks = marksFor.get(i) ?? [];
-    const voice = v.voices?.[n.v] ?? `Voice ${n.v + 1}`;
-    const lines = [`${voice}: ${n.name}${n.fixed ? ' (fixed)' : ''}`];
-    for (const m of marks) {
-      const other = m.o != null && notes[m.o === i ? m.n : m.o];
-      const with_ = other && other !== n ? ` (with ${v.voices?.[other.v] ?? 'another voice'} ${other.name})` : '';
-      lines.push(`${m.hard ? '✖' : '⚠'} ${m.rule}${with_}, cost ${m.cost}`);
-    }
-    const alt = alts.get(i);
-    if (alt) lines.push(`Next best: ${alt.name}, costs ${alt.delta} more`);
-    else if (!n.fixed && v.cost !== undefined) lines.push('No other note fits here');
-    const cls = `${n.fixed ? ' fixed' : ''}${marks.length ? ' marked' : ''}${marks.some((m) => m.hard) ? ' hard' : ''}`;
-    return { cls, tip: lines.join('\n') };
-  });
-}
-
-function legend(v, notes) {
-  const out = el('div', { class: 'roll-legend' });
-  for (const vi of [...new Set(notes.map((n) => n.v))].sort((a, b) => a - b)) {
-    out.append(el('span', { style: `--c:${VOICE_COLOR[vi % VOICE_COLOR.length]}` }, v.voices?.[vi] ?? `Voice ${vi + 1}`));
-  }
-  return out;
-}
-
-function issueLinks(v, root, pos) {
-  for (const m of v.marks ?? []) {
-    if (m.o == null || m.o === m.n) continue;
-    const a = v.notes[m.n];
-    const b = v.notes[m.o];
-    if (!a || !b) continue;
-    const pa = pos(a);
-    const pb = pos(b);
-    root.append(svg('line', { x1: pa.x, y1: pa.y, x2: pb.x, y2: pb.y, class: `roll-link${m.hard ? ' hard' : ''}` }));
-  }
-}
-
-/**
- * Builds a piano-roll SVG (plus a summary line) from an engine view. A compact roll
- * (the preview of any notes output) is shorter and has no summary or legend.
- */
-function renderRoll(v) {
-  const notes = v.notes ?? [];
-  const head = v.compact ? null : viewHead(v);
-  if (!notes.length) return [head, el('div', { class: 'roll-empty' }, 'No notes yet')].filter(Boolean);
-
-  const size = v.compact ? ROLL_COMPACT : ROLL;
-  const lo = Math.min(...notes.map((n) => n.p)) - 2;
-  const hi = Math.max(...notes.map((n) => n.p)) + 2;
-  const rows = hi - lo + 1;
-  const row = Math.max(2, Math.min(size.row, (size.max - 8) / rows));
-  const height = Math.max(size.min, rows * row + 8);
-  const top = (height - rows * row) / 2;
-  const W = ROLL.width;
-  const x = (t) => ROLL.left + (t / v.length) * (W - ROLL.left);
-  const y = (p) => top + (hi - p) * row;
-  const root = svg('svg', { class: 'roll', viewBox: `0 0 ${W} ${height}`, width: W, height });
-
-  // Octave lines and labels at each C; bar lines.
-  for (let p = lo; p <= hi; p++) {
-    if (((p % 12) + 12) % 12 !== 0) continue;
-    root.append(svg('line', { x1: ROLL.left, x2: W, y1: y(p) + row, y2: y(p) + row, class: 'roll-oct' }));
-    const label = svg('text', { x: 2, y: y(p) + row, class: 'roll-label' });
-    label.textContent = `C${Math.floor(p / 12) - 1}`;
-    root.append(label);
-  }
-  for (let t = 0; t <= v.length; t += v.bar) {
-    root.append(svg('line', { x1: x(t), x2: x(t), y1: 0, y2: height, class: 'roll-bar' }));
-  }
-
-  const info = noteInfo(v);
-  notes.forEach((n, i) => {
-    const w = Math.max(2, x(n.t + n.d) - x(n.t) - 1);
-    const rect = svg('rect', {
-      x: x(n.t) + 0.5, y: y(n.p) + 0.5, width: w, height: Math.max(2, row - 1), rx: 1.5,
-      class: `roll-note${info[i].cls}`,
-      style: `--c:${VOICE_COLOR[n.v % VOICE_COLOR.length]}`,
-    });
-    const title = svg('title');
-    title.textContent = info[i].tip;
-    rect.append(title);
-    root.append(rect);
-  });
-  // Lines joining the two notes of each two-voice issue (parallels, crossing, ...).
-  issueLinks(v, root, (n) => ({ x: x(n.t) + 3, y: y(n.p) + row / 2 }));
-  root.append(svg('line', { x1: 0, x2: 0, y1: 0, y2: height, class: 'roll-playhead', visibility: 'hidden', 'data-length': v.length, 'data-left': ROLL.left }));
-  return v.compact ? [root] : [head, root, legend(v, notes)];
-}
-
-// ---- Keyboard and step-grid previews -------------------------------------------------
-
-const WHITE_PCS = [0, 2, 4, 5, 7, 9, 11];
-const KEYS = { width: 210, height: 34, black: 0.62 };
-
-/** The segment of a looping timeline view sounding at `tick` (null: the first). */
-function segmentAt(v, tick) {
-  if (tick == null || !v.length) return 0;
-  const t = tick % v.length;
-  const i = v.segs.findIndex((s) => t >= s.t && t < s.t + s.d);
-  return i < 0 ? v.segs.length - 1 : i;
-}
-
-/**
- * A keyboard for a scale (one octave, its pitch classes lit) or a chord timeline (the
- * octaves its voicings span, its notes lit). A timeline also gets a strip of its steps;
- * during playback the sounding step is lit, and hovering a step shows it.
- */
-function renderKeys(v) {
-  const segs = v.segs ?? [];
-  const isScale = v.of === 'scale';
-  let lo = 0;
-  let hi = 11;
-  if (!isScale) {
-    const all = segs.flatMap((s) => s.keys);
-    lo = all.length ? Math.floor(Math.min(...all) / 12) * 12 : 60;
-    hi = all.length ? Math.floor(Math.max(...all) / 12) * 12 + 11 : 71;
-  }
-  const whites = [];
-  for (let k = lo; k <= hi; k++) if (WHITE_PCS.includes(k % 12)) whites.push(k);
-  const ww = KEYS.width / whites.length;
-  const root = svg('svg', { class: 'keys', viewBox: `0 0 ${KEYS.width} ${KEYS.height}`, width: KEYS.width, height: KEYS.height });
-  const keyEls = new Map();
-  whites.forEach((k, i) => {
-    const r = svg('rect', { x: i * ww + 0.5, y: 0.5, width: ww - 1, height: KEYS.height - 1, rx: 2, class: 'key white' });
-    keyEls.set(k, r);
-    root.append(r);
-  });
-  whites.forEach((k, i) => {
-    // A black key sits on the boundary after every white key except E and B.
-    const b = k + 1;
-    if (b > hi || WHITE_PCS.includes(b % 12)) return;
-    const bw = ww * KEYS.black;
-    const r = svg('rect', { x: (i + 1) * ww - bw / 2, y: 0, width: bw, height: KEYS.height * 0.6, rx: 1.5, class: 'key black' });
-    keyEls.set(b, r);
-    root.append(r);
-  });
-  // C labels show where octaves start on a chord keyboard.
-  if (!isScale) {
-    whites.forEach((k, i) => {
-      if (k % 12 !== 0) return;
-      const t = svg('text', { x: i * ww + ww / 2, y: KEYS.height - 4, class: 'key-label', 'text-anchor': 'middle' });
-      t.textContent = `C${k / 12 - 1}`;
-      root.append(t);
-    });
-  }
-
-  const label = el('div', { class: 'keys-label' });
-  const strip = segs.length > 1 ? el('div', { class: 'keys-strip' }) : null;
-  const cells = [];
-  const wrap = el('div', { class: `keys-view of-${isScale ? 'scale' : 'chord'}`, dataset: { preview: 'keys' } }, label, root, strip);
-  let current = 0;
-  let hover = null;
-  const show = (i) => {
-    const seg = segs[i];
-    if (!seg) return;
-    const lit = new Set(seg.keys.map((k) => (isScale ? ((k % 12) + 12) % 12 : k)));
-    for (const [k, r] of keyEls) {
-      r.classList.toggle('on', lit.has(k));
-      r.classList.toggle('root', lit.has(k) && seg.root != null && k % 12 === seg.root);
-    }
-    label.textContent = seg.label;
-    cells.forEach((c, j) => c.classList.toggle('now', j === i));
-  };
-  if (strip) {
-    segs.forEach((s, i) => {
-      const c = el('span', { class: 'keys-seg', style: `flex: ${s.d} 1 0`, title: s.label }, s.label);
-      c.addEventListener('pointerenter', () => { hover = i; show(i); });
-      c.addEventListener('pointerleave', () => { hover = null; show(current); });
-      cells.push(c);
-      strip.append(c);
-    });
-  }
-  wrap.showAt = (tick) => {
-    current = segmentAt(v, tick);
-    if (hover == null) show(current);
-  };
-  wrap.showAt(null);
-  return wrap;
-}
-
-/** A rhythm as a row of grid steps: hits filled (brighter when louder, dashed when they
- * might not play), bar lines, and the step under the playhead lit. */
-function renderSteps(v) {
-  const length = Math.max(1, v.length);
-  let grid = v.grid > 0 ? v.grid : length / 16;
-  let n = Math.max(1, Math.round(length / grid));
-  if (n > 64) {
-    n = 64;
-    grid = length / n;
-  }
-  const W = KEYS.width;
-  const H = 18;
-  const cw = W / n;
-  const root = svg('svg', { class: 'steps', viewBox: `0 0 ${W} ${H}`, width: W, height: H });
-  const cellEls = [];
-  for (let i = 0; i < n; i++) {
-    const r = svg('rect', { x: i * cw + 0.5, y: 0.5, width: Math.max(1, cw - 1), height: H - 1, rx: Math.min(2, cw / 4), class: 'step' });
-    cellEls.push(r);
-    root.append(r);
-  }
-  for (const o of v.onsets ?? []) {
-    const r = cellEls[Math.min(n - 1, Math.floor(o.t / grid))];
-    r.classList.add('hit');
-    if (o.prob < 100) r.classList.add('maybe');
-    r.style.opacity = String((0.45 + 0.55 * (o.vel / 127)) * (o.prob < 100 ? 0.4 + 0.6 * (o.prob / 100) : 1));
-  }
-  if (v.bar && length > v.bar) {
-    for (let t = v.bar; t < length; t += v.bar) {
-      const x = (t / length) * W;
-      root.append(svg('line', { x1: x, x2: x, y1: 0, y2: H, class: 'step-bar' }));
-    }
-  }
-  const wrap = el('div', { class: 'steps-view', dataset: { preview: 'steps' } }, root);
-  let now = null;
-  wrap.showAt = (tick) => {
-    now?.classList.remove('now');
-    now = tick == null ? null : cellEls[Math.min(n - 1, Math.floor((tick % length) / grid))];
-    now?.classList.add('now');
-  };
-  return wrap;
-}
-
-const LETTERS = 'CDEFGAB';
-
-/** Diatonic step (C4 = 28) and accidental of a spelled note name such as "F#4" or "Bb3". */
-function parseName(name) {
-  const m = /^([A-G])(bb|b|##|#|x)?(-?\d+)$/.exec(name);
-  if (!m) return null;
-  const acc = { b: -1, bb: -2, '#': 1, '##': 2, x: 2 }[m[2]] ?? 0;
-  return { step: Number(m[3]) * 7 + LETTERS.indexOf(m[1]), acc };
-}
-
-/** A simple grand staff: noteheads placed in time, coloured by voice. */
-function renderStaff(v) {
-  const notes = v.notes ?? [];
-  const head = viewHead(v);
-  if (!notes.length) return [head, el('div', { class: 'roll-empty' }, 'No notes yet')];
-  const parsed = notes.map((n) => parseName(n.name));
-  const steps = parsed.map((p) => p.step);
-  const half = 3.2; // one diatonic step, in px
-  const topStep = Math.max(40, Math.max(...steps) + 2);
-  const bottomStep = Math.min(16, Math.min(...steps) - 2);
-  const height = (topStep - bottomStep) * half + 12;
-  const y = (s) => 6 + (topStep - s) * half;
-  const W = ROLL.width;
-  const left = 30;
-  const x = (t) => left + 6 + (t / v.length) * (W - left - 10);
-  const root = svg('svg', { class: 'roll staff', viewBox: `0 0 ${W} ${height}`, width: W, height });
-  // Treble lines E4 G4 B4 D5 F5 and bass lines G2 B2 D3 F3 A3.
-  for (const s of [30, 32, 34, 36, 38, 18, 20, 22, 24, 26]) {
-    root.append(svg('line', { x1: 4, x2: W - 2, y1: y(s), y2: y(s), class: 'staff-line' }));
-  }
-  const clef = (text, s, size) => {
-    const t = svg('text', { x: 6, y: y(s), class: 'staff-clef', 'font-size': size });
-    t.textContent = text;
-    root.append(t);
-  };
-  clef('𝄞', 31.2, 25);
-  clef('𝄢', 24.6, 21);
-  for (let t = v.bar; t < v.length; t += v.bar) {
-    root.append(svg('line', { x1: x(t) - 4, x2: x(t) - 4, y1: y(38), y2: y(18), class: 'staff-bar' }));
-  }
-  root.append(svg('line', { x1: W - 2, x2: W - 2, y1: y(38), y2: y(18), class: 'staff-bar' }));
-  const info = noteInfo(v);
-  notes.forEach((n, i) => {
-    const { step, acc } = parsed[i];
-    const cx = x(n.t);
-    const cy = y(step);
-    // Ledger lines above, below and for middle C.
-    const ledgers = [];
-    for (let s = 40; s <= step; s += 2) ledgers.push(s);
-    for (let s = 16; s >= step; s -= 2) ledgers.push(s);
-    if (step === 28) ledgers.push(28);
-    for (const s of ledgers) root.append(svg('line', { x1: cx - 6, x2: cx + 6, y1: y(s), y2: y(s), class: 'staff-line' }));
-    if (acc) {
-      const a = svg('text', { x: cx - 11, y: cy + 3.5, class: 'staff-acc' });
-      a.textContent = { 1: '♯', 2: '𝄪', '-1': '♭', '-2': '𝄫' }[acc];
-      root.append(a);
-    }
-    const g = svg('g', { class: `staff-note${info[i].cls}`, style: `--c:${VOICE_COLOR[n.v % VOICE_COLOR.length]}` });
-    g.append(svg('ellipse', { cx, cy, rx: 4.2, ry: 3, transform: `rotate(-20 ${cx} ${cy})` }));
-    const title = svg('title');
-    title.textContent = info[i].tip;
-    g.append(title);
-    root.append(g);
-  });
-  issueLinks(v, root, (n) => ({ x: x(n.t), y: y(parseName(n.name).step) }));
-  root.append(svg('line', { x1: 0, x2: 0, y1: 0, y2: height, class: 'roll-playhead', visibility: 'hidden', 'data-length': v.length, 'data-left': left + 6 }));
-  return [head, root, legend(v, notes)];
-}
