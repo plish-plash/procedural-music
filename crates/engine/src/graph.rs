@@ -115,6 +115,18 @@ impl EvalContext {
             repeat: 0,
         }
     }
+
+    /// The context the editor's previews use: the first `bars` bars, as heard in a
+    /// section (see [`EvalContext::section`]).
+    pub fn preview(meter: Meter, bars: u32, sync: bool, section: u64, repeat: u32) -> Self {
+        EvalContext {
+            preview: true,
+            sync,
+            section,
+            repeat,
+            ..EvalContext::new(0, meter.ticks_per_bar() * bars.max(1), meter, 0)
+        }
+    }
 }
 
 /// A problem with one node (or with the graph, when `node` is empty).
@@ -430,6 +442,27 @@ impl Graph {
         sinks
     }
 
+    /// The value on one of a node's outputs (the first when `port` is `None`).
+    pub fn output_value(&self, node: &str, port: Option<&str>, ctx: &EvalContext) -> Result<Value, String> {
+        let i = self
+            .nodes
+            .iter()
+            .position(|n| n.id == node)
+            .ok_or_else(|| format!("no node '{node}'"))?;
+        let outputs = self.nodes[i].spec.outputs;
+        let out = match port {
+            Some(name) => outputs
+                .iter()
+                .position(|p| p.name == name)
+                .ok_or_else(|| format!("no output '{name}'"))?,
+            None if outputs.is_empty() => return Err("this node has no output".into()),
+            None => 0,
+        };
+        self.run(ctx).outputs[i][out]
+            .take()
+            .ok_or_else(|| "no value yet: connect its inputs".into())
+    }
+
     /// Issues plus a short text preview of every node's output, evaluated over the
     /// first `bars` bars.
     pub fn report(&self, meter: Meter, bars: u32, sync: bool) -> CompileReport {
@@ -445,16 +478,7 @@ impl Graph {
         section: u64,
         repeat: u32,
     ) -> CompileReport {
-        let ctx = EvalContext {
-            start: 0,
-            end: meter.ticks_per_bar() * bars.max(1),
-            meter,
-            salt: 0,
-            preview: true,
-            sync,
-            section,
-            repeat,
-        };
+        let ctx = EvalContext::preview(meter, bars, sync, section, repeat);
         let eval = self.run(&ctx);
         let mut issues = self.issues.clone();
         issues.extend(eval.issues);
@@ -492,10 +516,18 @@ impl Graph {
             };
             previews.push((node.id.clone(), text));
         }
+        // Nodes that draw their own view keep it; others show their first output.
         let views = self
             .nodes
             .iter()
-            .filter_map(|n| Some((n.id.clone(), n.imp.as_ref()?.view()?)))
+            .enumerate()
+            .filter_map(|(i, n)| {
+                let own = n.imp.as_ref().and_then(|imp| imp.view());
+                let view = own.or_else(|| {
+                    value_view(eval.outputs[i].iter().flatten().next()?, meter, ctx.end)
+                })?;
+                Some((n.id.clone(), view))
+            })
             .collect();
         CompileReport {
             issues,
@@ -548,7 +580,7 @@ fn describe_timeline<T>(tl: &Timeline<T>, meter: Meter, line: impl Fn(&T) -> Str
     out.trim_end().to_string()
 }
 
-fn describe(v: &Value, meter: Meter) -> String {
+pub(crate) fn describe(v: &Value, meter: Meter) -> String {
     match v {
         Value::Scale(tl) => {
             describe_timeline(tl, meter, |s: &Scale| format!("{s} · {}", pc_names(s)))
@@ -560,6 +592,113 @@ fn describe(v: &Value, meter: Meter) -> String {
         Value::Rhythm(r) => format!("{r}"),
         Value::Notes(n) => describe_notes(n, meter),
     }
+}
+
+// ---- Preview views -----------------------------------------------------------
+
+/// Most timeline steps a view carries (a long progression still draws its start).
+const MAX_VIEW_SEGMENTS: usize = 64;
+
+/// A drawable preview of a value: a keyboard for scales and chords, a step grid for
+/// rhythms, a piano roll for notes. `None` where only text makes sense (other tunings).
+pub(crate) fn value_view(v: &Value, meter: Meter, window: Ticks) -> Option<Json> {
+    let bar = meter.ticks_per_bar();
+    match v {
+        Value::Scale(tl) => {
+            if !tl.values().all(|s| s.tuning().is_twelve()) {
+                return None;
+            }
+            Some(keys_view(tl, bar, "scale", |s: &Scale| {
+                let pcs = (0..s.len() as i32).map(|d| s.pitch(d, 4).pitch_class());
+                (s.to_string(), pcs.map(|pc| pc as i32).collect(), Some(s.root()))
+            }))
+        }
+        Value::Chord(tl) => {
+            if !tl.values().all(|c| c.tuning().is_twelve()) {
+                return None;
+            }
+            Some(keys_view(tl, bar, "chord", |c: &Chord| {
+                (c.to_string(), c.notes().iter().map(|p| p.step()).collect(), c.root())
+            }))
+        }
+        Value::Rhythm(r) => {
+            let onsets = r
+                .onsets()
+                .iter()
+                .map(|o| {
+                    Json::obj(vec![
+                        ("t", Json::Num(o.offset as f64)),
+                        ("d", Json::Num(o.duration as f64)),
+                        ("vel", Json::Num(o.velocity as f64)),
+                        ("prob", Json::Num(o.probability as f64)),
+                    ])
+                })
+                .collect();
+            Some(Json::obj(vec![
+                ("kind", Json::str("steps")),
+                ("length", Json::Num(r.length() as f64)),
+                ("grid", Json::Num(r.grid() as f64)),
+                ("bar", Json::Num(bar as f64)),
+                ("onsets", Json::Arr(onsets)),
+            ]))
+        }
+        Value::Notes(notes) => {
+            if !notes.iter().all(|n| n.pitch.tuning().is_twelve()) {
+                return None;
+            }
+            let notes = notes
+                .iter()
+                .filter(|n| n.start < window)
+                .map(|n| {
+                    Json::obj(vec![
+                        ("t", Json::Num(n.start as f64)),
+                        ("d", Json::Num(n.duration as f64)),
+                        ("p", Json::Num(n.pitch.step() as f64)),
+                        ("v", Json::Num(n.voice as f64)),
+                        ("fixed", Json::Bool(false)),
+                        ("name", Json::str(n.pitch.to_string())),
+                    ])
+                })
+                .collect();
+            Some(Json::obj(vec![
+                ("kind", Json::str("roll")),
+                ("compact", Json::Bool(true)),
+                ("length", Json::Num(window as f64)),
+                ("bar", Json::Num(bar as f64)),
+                ("notes", Json::Arr(notes)),
+            ]))
+        }
+    }
+}
+
+/// A keyboard view of a scale or chord timeline (`of`). `keys` gives each value's label,
+/// its keys (pitch classes for a scale, MIDI notes for a chord) and its root pitch class.
+fn keys_view<T>(
+    tl: &Timeline<T>,
+    bar: Ticks,
+    of: &str,
+    keys: impl Fn(&T) -> (String, Vec<i32>, Option<u8>),
+) -> Json {
+    let mut start = 0;
+    let mut segs = Vec::new();
+    for (duration, v) in tl.steps().iter().take(MAX_VIEW_SEGMENTS) {
+        let (label, notes, root) = keys(v);
+        segs.push(Json::obj(vec![
+            ("t", Json::Num(start as f64)),
+            ("d", Json::Num(*duration as f64)),
+            ("label", Json::str(label)),
+            ("keys", Json::Arr(notes.into_iter().map(|k| Json::Num(k as f64)).collect())),
+            ("root", root.map_or(Json::Null, |r| Json::Num(r as f64))),
+        ]));
+        start += duration;
+    }
+    Json::obj(vec![
+        ("kind", Json::str("keys")),
+        ("of", Json::str(of)),
+        ("length", Json::Num(tl.length() as f64)),
+        ("bar", Json::Num(bar as f64)),
+        ("segs", Json::Arr(segs)),
+    ])
 }
 
 fn describe_notes(notes: &[Note], meter: Meter) -> String {
@@ -770,5 +909,53 @@ mod tests {
         let r = Graph::compile(&doc).report(Meter::COMMON, 1, true);
         assert_eq!(r.previews[0].1, "D Dorian · D E F G A B C");
         assert_eq!(r.previews[1].1, "F Lydian · F G A B C D E");
+    }
+
+    fn view<'a>(r: &'a CompileReport, id: &str) -> &'a Json {
+        &r.views.iter().find(|v| v.0 == id).unwrap_or_else(|| panic!("no view for {id}")).1
+    }
+
+    fn nums(j: &Json) -> Vec<f64> {
+        j.as_array().iter().filter_map(Json::as_f64).collect()
+    }
+
+    #[test]
+    fn value_views() {
+        let mut doc = patch_two();
+        doc.nodes.push(node(
+            "s",
+            "scale",
+            &[("root", text("D")), ("scale", text("Dorian"))],
+        ));
+        doc.nodes.push(node("e", "euclid", &[]));
+        let r = Graph::compile(&doc).report(Meter::COMMON, 4, true);
+
+        // A scale: one constant segment with its seven pitch classes and root.
+        let s = view(&r, "s");
+        assert_eq!(s.get("kind").unwrap().as_str(), Some("keys"));
+        assert_eq!(s.get("of").unwrap().as_str(), Some("scale"));
+        let segs = s.get("segs").unwrap().as_array();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(nums(segs[0].get("keys").unwrap()), [2.0, 4.0, 5.0, 7.0, 9.0, 11.0, 0.0]);
+        assert_eq!(segs[0].get("root").unwrap().as_f64(), Some(2.0));
+
+        // A progression: one segment per chord, with absolute notes.
+        let p = view(&r, "prog");
+        assert_eq!(p.get("of").unwrap().as_str(), Some("chord"));
+        let segs = p.get("segs").unwrap().as_array();
+        assert_eq!(segs.len(), 4);
+        assert_eq!(nums(segs[0].get("keys").unwrap()), [60.0, 64.0, 67.0]);
+        assert_eq!(segs[1].get("t").unwrap().as_f64(), segs[0].get("d").unwrap().as_f64());
+
+        // A rhythm: its onsets on a grid.
+        let e = view(&r, "e");
+        assert_eq!(e.get("kind").unwrap().as_str(), Some("steps"));
+        assert!(e.get("grid").unwrap().as_f64().unwrap() > 0.0);
+        assert!(!e.get("onsets").unwrap().as_array().is_empty());
+
+        // Notes: a compact roll.
+        let n = view(&r, "play");
+        assert_eq!(n.get("kind").unwrap().as_str(), Some("roll"));
+        assert_eq!(n.get("notes").unwrap().as_array().len(), 16);
     }
 }

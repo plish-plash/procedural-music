@@ -9,6 +9,7 @@
 //! the clock, the MIDI ports and the JSON layer.
 
 pub mod api;
+mod audition;
 mod engine;
 mod graph;
 pub mod json;

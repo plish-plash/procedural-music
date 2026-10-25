@@ -38,6 +38,8 @@ export function svg(tag, attrs = {}) {
 }
 
 const TYPE_COLOR = { scale: '#40d2be', chord: '#f5b446', rhythm: '#ff7aa8', notes: '#6e96ff', audio: '#b8e06a', any: '#8a93a3' };
+// Output types that can be auditioned with a click.
+const AUDIBLE = new Set(['scale', 'chord', 'rhythm']);
 
 /** An empty group graph. */
 export function emptyGraph() {
@@ -100,8 +102,11 @@ function uniqueName(list, base) {
 }
 
 export class Editor {
-  constructor({ canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, specs, onChange, onLibrarySave, onSectionMode }) {
-    Object.assign(this, { canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, onChange, onLibrarySave, onSectionMode });
+  constructor({ canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, specs, onChange, onLibrarySave, onSectionMode, onAudition, onProbe }) {
+    Object.assign(this, { canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, onChange, onLibrarySave, onSectionMode, onAudition, onProbe });
+    // The card shown while hovering a wire: what the wire carries.
+    this.probe = { el: el('div', { class: 'probe', hidden: '' }), wire: null, timer: null, cache: new Map(), x: 0, y: 0 };
+    document.body.append(this.probe.el);
     this.specList = specs.nodes;
     this.specs = Object.fromEntries(specs.nodes.map((s) => [s.kind, s]));
     this.compat = new Set(specs.compat.map(([a, b]) => `${a}>${b}`));
@@ -671,6 +676,7 @@ export class Editor {
   }
 
   renderAll() {
+    this.hideProbe();
     this.nodesEl.replaceChildren(...this.allNodes().map((n) => this.renderNode(n)));
     this.emptyHint.hidden = this.allNodes().length > 0;
     this.renderCrumbs();
@@ -771,6 +777,12 @@ export class Editor {
     dir === 'in' ? el('span', { class: 'dot' }) : null,
     el('span', { class: 'label' }, p.add ? '+ add' : p.name),
     dir === 'out' ? el('span', { class: 'dot' }) : null);
+    if (dir === 'out' && AUDIBLE.has(p.type) && !p.io && n.type !== 'group' && n.type !== IN) {
+      // Clicking a theory output's name plays it.
+      port.classList.add('audible');
+      port.title = `${p.name} (${p.type}) · click to hear`;
+      port.querySelector('.label').addEventListener('click', () => this.audition(n.id, p.name));
+    }
     if (p.io) {
       // Group port nodes: rename on double-click, remove with ×.
       const ioDir = n.type === IN ? 'in' : 'out';
@@ -905,6 +917,7 @@ export class Editor {
   /** Shows the engine's previews and issues on the nodes. */
   setReport(report) {
     this.report = report;
+    this.probe.cache.clear();
     const issues = {};
     for (const i of report.issues ?? []) (issues[i.node] ??= []).push(i.message);
     for (const n of this.allNodes()) {
@@ -926,20 +939,31 @@ export class Editor {
           info.textContent = `${count} node${count === 1 ? '' : 's'} inside${over ? ` · ${over} set for ${this.section().name}` : ''}`;
         }
       }
-      // A node with a piano roll doesn't also need the text preview.
-      if (pre) pre.textContent = data ? '' : report.previews?.[flat] ?? '';
+      // A node with a drawn view shows its text preview on hover instead.
+      const text = report.previews?.[flat] ?? '';
+      if (pre) pre.textContent = data ? '' : text;
       if (issue) issue.textContent = mine.join('\n');
       node.classList.toggle('has-issue', mine.length > 0);
       const view = node.querySelector('.node-view');
       if (view) {
-        if (data?.kind === 'roll') view.replaceChildren(...this.renderView(flat, data));
-        else view.replaceChildren();
+        view.replaceChildren(...(data ? this.renderView(flat, data) : []));
+        view.title = data && data.kind !== 'roll' ? text : '';
+        if (data?.kind === 'keys' || data?.kind === 'steps') {
+          view.append(el('button', {
+            class: 'audition', title: 'Hear it (or click the output\'s name)',
+            onclick: (e) => { e.stopPropagation(); this.audition(n.id, null); },
+          }, '▶'));
+        }
       }
     }
     this.lastTick = null;
   }
 
   renderView(flat, data) {
+    if (data.kind === 'keys') return [renderKeys(data)];
+    if (data.kind === 'steps') return [renderSteps(data)];
+    if (data.kind !== 'roll') return [];
+    if (data.compact) return renderRoll(data);
     const mode = this.rollMode[flat] ?? 'roll';
     const staffable = (data.notes ?? []).every((n) => /^[A-G]/.test(n.name));
     const parts = mode === 'staff' && staffable ? renderStaff(data) : renderRoll(data);
@@ -952,11 +976,24 @@ export class Editor {
     return parts;
   }
 
-  /** Moves the playhead line on piano-roll views (tick = null hides it). */
+  /** Plays one of a node's outputs (null: the first) once, and marks the node meanwhile. */
+  async audition(id, port) {
+    const seconds = await this.onAudition?.(this.flat(id), port);
+    const node = this.nodeEl(id);
+    if (seconds == null || !node) return;
+    clearTimeout(this.auditionTimer);
+    for (const e of this.nodesEl.querySelectorAll('.node.auditioning')) e.classList.remove('auditioning');
+    node.classList.add('auditioning');
+    this.auditionTimer = setTimeout(() => this.nodeEl(id)?.classList.remove('auditioning'), seconds * 1000);
+  }
+
+  /** Moves the playhead on piano-roll views and lights up previews (tick = null: stopped). */
   setPlayhead(tick) {
     if (tick === this.lastTick) return;
     this.lastTick = tick;
-    for (const line of this.nodesEl.querySelectorAll('.roll-playhead')) {
+    const all = (sel) => [...this.nodesEl.querySelectorAll(sel), ...this.probe.el.querySelectorAll(sel)];
+    for (const preview of all('[data-preview]')) preview.showAt?.(tick);
+    for (const line of all('.roll-playhead')) {
       const length = Number(line.dataset.length);
       const left = Number(line.dataset.left ?? ROLL.left);
       if (tick == null || !length) {
@@ -968,6 +1005,96 @@ export class Editor {
       line.setAttribute('x2', x);
       line.setAttribute('visibility', 'visible');
     }
+  }
+
+  // ---- Wire probe ------------------------------------------------------------------
+
+  /**
+   * The flat node path and port that produce the value on an output, looking through
+   * groups: a group's output leads to what feeds it inside, a group input to what feeds
+   * the group outside. Null when nothing does.
+   */
+  resolveSource(path, node, port) {
+    const graphAt = (p) => p.reduce((g, id) => g.nodes.find((n) => n.id === id).graph, this.doc);
+    for (let depth = 0; depth < 64; depth++) {
+      if (node === IN) {
+        if (!path.length) return null;
+        const w = graphAt(path.slice(0, -1)).wires.find((x) => x.to.node === path.at(-1) && x.to.port === port);
+        if (!w) return null;
+        path = path.slice(0, -1);
+        ({ node, port } = w.from);
+        continue;
+      }
+      const n = graphAt(path).nodes.find((x) => x.id === node);
+      if (n?.type === 'group') {
+        const w = n.graph.wires.find((x) => x.to.node === OUT && x.to.port === port);
+        if (!w) return null;
+        path = [...path, node];
+        ({ node, port } = w.from);
+        continue;
+      }
+      return { node: [...path, node].join('/'), port };
+    }
+    return null;
+  }
+
+  /** Starts showing what a hovered wire carries, after a short pause. */
+  hoverWire(e) {
+    const g = e.target.closest?.('[data-wire]');
+    if (!g || this.drag || this.menu) return;
+    const i = Number(g.dataset.wire);
+    if (this.probe.wire === i) return;
+    this.hideProbe();
+    this.probe.wire = i;
+    g.querySelector('path.wire')?.classList.add('probed');
+    this.probe.timer = setTimeout(() => this.showProbe(i), 150);
+  }
+
+  async showProbe(i) {
+    const w = this.g.wires[i];
+    if (!w || this.probe.wire !== i) return;
+    const src = this.resolveSource(this.path, w.from.node, w.from.port);
+    const key = src && `${src.node}|${src.port}`;
+    let result = key ? this.probe.cache.get(key) : { error: 'Nothing feeds this group port yet' };
+    if (!result) {
+      result = (await this.onProbe?.(src.node, src.port)) ?? { error: 'Nothing to show' };
+      this.probe.cache.set(key, result);
+    }
+    if (this.probe.wire !== i) return; // moved on while waiting
+    const name = (id, port) => `${this.specFor(this.node(id))?.title ?? id} · ${port}`;
+    const type = this.portType(w.from.node, 'out', w.from.port);
+    const head = el('div', { class: 'probe-head' },
+      el('span', { class: 'swatch', style: `background:${TYPE_COLOR[type] ?? '#888'}` }),
+      `${name(w.from.node, w.from.port)} → ${name(w.to.node, w.to.port)}`);
+    const v = result.view;
+    const view = v?.kind === 'keys' ? [renderKeys(v)] : v?.kind === 'steps' ? [renderSteps(v)] : v?.kind === 'roll' ? renderRoll(v) : [];
+    const text = result.error ? el('div', { class: 'probe-error' }, result.error) : el('pre', { class: 'probe-text' }, result.text);
+    this.probe.el.replaceChildren(head, ...view, text);
+    this.probe.el.hidden = false;
+    this.placeProbe();
+    // Light up the new views at the current playhead.
+    const tick = this.lastTick;
+    this.lastTick = undefined;
+    this.setPlayhead(tick);
+  }
+
+  /** Keeps the probe card next to the pointer, inside the window. */
+  placeProbe(x = this.probe.x, y = this.probe.y) {
+    this.probe.x = x;
+    this.probe.y = y;
+    const p = this.probe.el;
+    if (p.hidden) return;
+    const left = x + 16 + p.offsetWidth > window.innerWidth - 8 ? x - 16 - p.offsetWidth : x + 16;
+    const top = Math.min(y + 16, window.innerHeight - p.offsetHeight - 8);
+    p.style.left = `${Math.max(8, left)}px`;
+    p.style.top = `${Math.max(8, top)}px`;
+  }
+
+  hideProbe() {
+    clearTimeout(this.probe.timer);
+    this.probe.wire = null;
+    this.probe.el.hidden = true;
+    for (const p of this.wiresEl.querySelectorAll('path.probed')) p.classList.remove('probed');
   }
 
   // ---- Wires ---------------------------------------------------------------------
@@ -1008,7 +1135,8 @@ export class Editor {
       const d = Editor.curve(a, b);
       const g = svg('g', { 'data-wire': i });
       g.append(svg('path', { class: 'hit', d }));
-      g.append(svg('path', { class: `wire${this.selectedWire === i ? ' selected' : ''}`, d, stroke: TYPE_COLOR[fromType] ?? '#888' }));
+      const cls = `wire${this.selectedWire === i ? ' selected' : ''}${this.probe.wire === i ? ' probed' : ''}`;
+      g.append(svg('path', { class: cls, d, stroke: TYPE_COLOR[fromType] ?? '#888' }));
       if (fromType && toType && fromType !== toType) {
         // Implicit conversion badge at the midpoint.
         const mx = (a.x + b.x) / 2;
@@ -1087,6 +1215,12 @@ export class Editor {
     window.addEventListener('pointermove', (e) => this.onMove(e));
     window.addEventListener('pointerup', (e) => this.onUp(e));
     c.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
+    // Hovering a wire shows what it carries.
+    this.wiresEl.addEventListener('pointerover', (e) => this.hoverWire(e));
+    this.wiresEl.addEventListener('pointermove', (e) => this.placeProbe(e.clientX, e.clientY));
+    this.wiresEl.addEventListener('pointerout', (e) => {
+      if (!e.relatedTarget?.closest?.('#wires [data-wire]')) this.hideProbe();
+    });
     c.addEventListener('dblclick', (e) => {
       if (e.target.closest('.node')) return;
       this.openAddMenu(e.clientX, e.clientY, null);
@@ -1125,6 +1259,7 @@ export class Editor {
   }
 
   onDown(e) {
+    this.hideProbe();
     if (e.button !== 0 && e.button !== 1) return;
     const dot = e.target.closest('.dot');
     const nodeE = e.target.closest('.node');
@@ -1279,6 +1414,7 @@ export class Editor {
 
   onWheel(e) {
     if (e.target.closest('.node-preview, select')) return;
+    this.hideProbe();
     e.preventDefault();
     const r = this.canvas.getBoundingClientRect();
     const mx = e.clientX - r.left;
@@ -1432,6 +1568,7 @@ function fmtLog(v) {
 // ---- Piano roll and staff -----------------------------------------------------------
 
 const ROLL = { width: 360, left: 26, row: 8, min: 110, max: 230 };
+const ROLL_COMPACT = { ...ROLL, row: 5, min: 54, max: 96 };
 
 function summary(minor, broken) {
   const parts = [];
@@ -1504,17 +1641,21 @@ function issueLinks(v, root, pos) {
   }
 }
 
-/** Builds a piano-roll SVG (plus a summary line) from an engine view. */
+/**
+ * Builds a piano-roll SVG (plus a summary line) from an engine view. A compact roll
+ * (the preview of any notes output) is shorter and has no summary or legend.
+ */
 function renderRoll(v) {
   const notes = v.notes ?? [];
-  const head = viewHead(v);
-  if (!notes.length) return [head, el('div', { class: 'roll-empty' }, 'No notes yet')];
+  const head = v.compact ? null : viewHead(v);
+  if (!notes.length) return [head, el('div', { class: 'roll-empty' }, 'No notes yet')].filter(Boolean);
 
+  const size = v.compact ? ROLL_COMPACT : ROLL;
   const lo = Math.min(...notes.map((n) => n.p)) - 2;
   const hi = Math.max(...notes.map((n) => n.p)) + 2;
   const rows = hi - lo + 1;
-  const row = Math.max(2, Math.min(ROLL.row, (ROLL.max - 8) / rows));
-  const height = Math.max(ROLL.min, rows * row + 8);
+  const row = Math.max(2, Math.min(size.row, (size.max - 8) / rows));
+  const height = Math.max(size.min, rows * row + 8);
   const top = (height - rows * row) / 2;
   const W = ROLL.width;
   const x = (t) => ROLL.left + (t / v.length) * (W - ROLL.left);
@@ -1549,7 +1690,140 @@ function renderRoll(v) {
   // Lines joining the two notes of each two-voice issue (parallels, crossing, ...).
   issueLinks(v, root, (n) => ({ x: x(n.t) + 3, y: y(n.p) + row / 2 }));
   root.append(svg('line', { x1: 0, x2: 0, y1: 0, y2: height, class: 'roll-playhead', visibility: 'hidden', 'data-length': v.length, 'data-left': ROLL.left }));
-  return [head, root, legend(v, notes)];
+  return v.compact ? [root] : [head, root, legend(v, notes)];
+}
+
+// ---- Keyboard and step-grid previews -------------------------------------------------
+
+const WHITE_PCS = [0, 2, 4, 5, 7, 9, 11];
+const KEYS = { width: 210, height: 34, black: 0.62 };
+
+/** The segment of a looping timeline view sounding at `tick` (null: the first). */
+function segmentAt(v, tick) {
+  if (tick == null || !v.length) return 0;
+  const t = tick % v.length;
+  const i = v.segs.findIndex((s) => t >= s.t && t < s.t + s.d);
+  return i < 0 ? v.segs.length - 1 : i;
+}
+
+/**
+ * A keyboard for a scale (one octave, its pitch classes lit) or a chord timeline (the
+ * octaves its voicings span, its notes lit). A timeline also gets a strip of its steps;
+ * during playback the sounding step is lit, and hovering a step shows it.
+ */
+function renderKeys(v) {
+  const segs = v.segs ?? [];
+  const isScale = v.of === 'scale';
+  let lo = 0;
+  let hi = 11;
+  if (!isScale) {
+    const all = segs.flatMap((s) => s.keys);
+    lo = all.length ? Math.floor(Math.min(...all) / 12) * 12 : 60;
+    hi = all.length ? Math.floor(Math.max(...all) / 12) * 12 + 11 : 71;
+  }
+  const whites = [];
+  for (let k = lo; k <= hi; k++) if (WHITE_PCS.includes(k % 12)) whites.push(k);
+  const ww = KEYS.width / whites.length;
+  const root = svg('svg', { class: 'keys', viewBox: `0 0 ${KEYS.width} ${KEYS.height}`, width: KEYS.width, height: KEYS.height });
+  const keyEls = new Map();
+  whites.forEach((k, i) => {
+    const r = svg('rect', { x: i * ww + 0.5, y: 0.5, width: ww - 1, height: KEYS.height - 1, rx: 2, class: 'key white' });
+    keyEls.set(k, r);
+    root.append(r);
+  });
+  whites.forEach((k, i) => {
+    // A black key sits on the boundary after every white key except E and B.
+    const b = k + 1;
+    if (b > hi || WHITE_PCS.includes(b % 12)) return;
+    const bw = ww * KEYS.black;
+    const r = svg('rect', { x: (i + 1) * ww - bw / 2, y: 0, width: bw, height: KEYS.height * 0.6, rx: 1.5, class: 'key black' });
+    keyEls.set(b, r);
+    root.append(r);
+  });
+  // C labels show where octaves start on a chord keyboard.
+  if (!isScale) {
+    whites.forEach((k, i) => {
+      if (k % 12 !== 0) return;
+      const t = svg('text', { x: i * ww + ww / 2, y: KEYS.height - 4, class: 'key-label', 'text-anchor': 'middle' });
+      t.textContent = `C${k / 12 - 1}`;
+      root.append(t);
+    });
+  }
+
+  const label = el('div', { class: 'keys-label' });
+  const strip = segs.length > 1 ? el('div', { class: 'keys-strip' }) : null;
+  const cells = [];
+  const wrap = el('div', { class: `keys-view of-${isScale ? 'scale' : 'chord'}`, dataset: { preview: 'keys' } }, label, root, strip);
+  let current = 0;
+  let hover = null;
+  const show = (i) => {
+    const seg = segs[i];
+    if (!seg) return;
+    const lit = new Set(seg.keys.map((k) => (isScale ? ((k % 12) + 12) % 12 : k)));
+    for (const [k, r] of keyEls) {
+      r.classList.toggle('on', lit.has(k));
+      r.classList.toggle('root', lit.has(k) && seg.root != null && k % 12 === seg.root);
+    }
+    label.textContent = seg.label;
+    cells.forEach((c, j) => c.classList.toggle('now', j === i));
+  };
+  if (strip) {
+    segs.forEach((s, i) => {
+      const c = el('span', { class: 'keys-seg', style: `flex: ${s.d} 1 0`, title: s.label }, s.label);
+      c.addEventListener('pointerenter', () => { hover = i; show(i); });
+      c.addEventListener('pointerleave', () => { hover = null; show(current); });
+      cells.push(c);
+      strip.append(c);
+    });
+  }
+  wrap.showAt = (tick) => {
+    current = segmentAt(v, tick);
+    if (hover == null) show(current);
+  };
+  wrap.showAt(null);
+  return wrap;
+}
+
+/** A rhythm as a row of grid steps: hits filled (brighter when louder, dashed when they
+ * might not play), bar lines, and the step under the playhead lit. */
+function renderSteps(v) {
+  const length = Math.max(1, v.length);
+  let grid = v.grid > 0 ? v.grid : length / 16;
+  let n = Math.max(1, Math.round(length / grid));
+  if (n > 64) {
+    n = 64;
+    grid = length / n;
+  }
+  const W = KEYS.width;
+  const H = 18;
+  const cw = W / n;
+  const root = svg('svg', { class: 'steps', viewBox: `0 0 ${W} ${H}`, width: W, height: H });
+  const cellEls = [];
+  for (let i = 0; i < n; i++) {
+    const r = svg('rect', { x: i * cw + 0.5, y: 0.5, width: Math.max(1, cw - 1), height: H - 1, rx: Math.min(2, cw / 4), class: 'step' });
+    cellEls.push(r);
+    root.append(r);
+  }
+  for (const o of v.onsets ?? []) {
+    const r = cellEls[Math.min(n - 1, Math.floor(o.t / grid))];
+    r.classList.add('hit');
+    if (o.prob < 100) r.classList.add('maybe');
+    r.style.opacity = String((0.45 + 0.55 * (o.vel / 127)) * (o.prob < 100 ? 0.4 + 0.6 * (o.prob / 100) : 1));
+  }
+  if (v.bar && length > v.bar) {
+    for (let t = v.bar; t < length; t += v.bar) {
+      const x = (t / length) * W;
+      root.append(svg('line', { x1: x, x2: x, y1: 0, y2: H, class: 'step-bar' }));
+    }
+  }
+  const wrap = el('div', { class: 'steps-view', dataset: { preview: 'steps' } }, root);
+  let now = null;
+  wrap.showAt = (tick) => {
+    now?.classList.remove('now');
+    now = tick == null ? null : cellEls[Math.min(n - 1, Math.floor((tick % length) / grid))];
+    now?.classList.add('now');
+  };
+  return wrap;
 }
 
 const LETTERS = 'CDEFGAB';

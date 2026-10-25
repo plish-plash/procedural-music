@@ -127,6 +127,7 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 #wires { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
 #wires path.wire { fill: none; stroke-width: 2.5; pointer-events: stroke; cursor: pointer; }
 #wires path.hit { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; cursor: pointer; }
+#wires path.wire.probed { stroke-width: 4; }
 #wires path.wire.selected { stroke-width: 4; filter: drop-shadow(0 0 4px rgba(255,255,255,0.5)); }
 #wires path.temp { stroke-dasharray: 6 5; }
 #wires .badge rect { fill: #0d1015; stroke: var(--line); }
@@ -234,6 +235,42 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 .roll-empty { color: #7d8799; font-size: 12px; padding: 8px 0; }
 .roll-legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 5px; font-size: 11px; color: #aab3c2; }
 .roll-legend span::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--c); margin-right: 4px; }
+/* Auditioning: a play button on previews, and clickable output names. */
+.node-view { position: relative; }
+.node-view .audition {
+  position: absolute; top: 4px; right: 8px; width: 20px; height: 18px; padding: 0;
+  font-size: 9px; line-height: 18px; border-radius: 4px; color: var(--text-2); background: #1f2530; opacity: 0.75;
+}
+.node-view .audition:hover { opacity: 1; color: var(--text); }
+.node.auditioning .node-view .audition { opacity: 1; color: #12161d; background: var(--t-scale); }
+.port.audible .label { cursor: pointer; }
+.port.audible .label:hover { color: var(--text); text-decoration: underline dotted; }
+
+/* Keyboard previews (scales and chords) and step grids (rhythms). */
+.keys-view.of-scale { --kc: var(--t-scale); }
+.keys-view.of-chord { --kc: var(--t-chord); }
+.keys-label { font: 11.5px var(--mono); color: #c9d1de; margin-bottom: 4px; padding-right: 26px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.keys, .steps { display: block; width: 100%; height: auto; }
+.steps-view { padding-right: 26px; }
+.key.white { fill: #d9dee7; stroke: #12161d; stroke-width: 1; }
+.key.black { fill: #1c212b; stroke: #12161d; stroke-width: 1; }
+.key { transition: fill 80ms; }
+.key.on { fill: color-mix(in srgb, var(--kc) 70%, #fff); }
+.key.black.on { fill: color-mix(in srgb, var(--kc) 75%, #000); }
+.key.root { fill: var(--kc); }
+.key-label { fill: #6f7a8c; font: 7px var(--mono); pointer-events: none; }
+.keys-strip { display: flex; gap: 1px; margin-top: 4px; height: 15px; }
+.keys-seg {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font: 9.5px/15px var(--mono); text-align: center; color: #9aa4b5; background: #1a1f28; border-radius: 3px; cursor: default;
+}
+.keys-seg.now { background: color-mix(in srgb, var(--kc) 35%, #1a1f28); color: #fff; }
+.step { fill: #1a1f28; stroke: none; }
+.step.hit { fill: var(--t-rhythm); }
+.step.maybe { stroke: var(--t-rhythm); stroke-width: 1; stroke-dasharray: 2 1.5; }
+.step.now { stroke: #e8ecf3; stroke-width: 1.5; stroke-dasharray: none; opacity: 1 !important; }
+.step-bar { stroke: #6f7a8c; stroke-width: 1; }
+
 .node-issue { padding: 6px 10px 8px; color: var(--danger); font-size: 12px; border-top: 1px solid #3a2226; }
 .node-issue:empty { display: none; }
 
@@ -330,6 +367,16 @@ button.mini { padding: 1px 7px; font-size: 11px; border-radius: 5px; background:
 .popup button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 6px 10px; }
 .popup button:hover { background: #2e3646; }
 .select-box { position: absolute; border: 1px dashed #8aa6ff; background: rgba(110, 150, 255, 0.08); pointer-events: none; }
+
+/* The card shown while hovering a wire. */
+.probe {
+  position: fixed; z-index: 110; width: 260px; padding: 8px 10px; pointer-events: none;
+  background: var(--panel-2); border: 1px solid #3a4252; border-radius: 8px; box-shadow: 0 10px 28px rgba(0,0,0,0.5);
+}
+.probe-head { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-2); margin-bottom: 6px; }
+.probe-head .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.probe-text { margin: 6px 0 0; font: 11px/1.4 var(--mono); color: #c9d1de; white-space: pre-wrap; max-height: 140px; overflow: hidden; }
+.probe-error { font-size: 12px; color: var(--text-3); }
 
 /* ---- Staff view ----------------------------------------------------------- */
 

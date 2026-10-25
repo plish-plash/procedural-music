@@ -41,7 +41,15 @@ file faster than real time.
 - Port colors: scale (teal), chord (amber), rhythm (pink), notes (blue), audio (lime
   triangles). A chord wired into a scale input is converted automatically (shown with a
   badge on the wire). Sound chains run instrument → effects → Mixer → Audio out.
-- Every node shows a live preview of its output, and problems in red.
+- Every node shows a live preview of its output, and problems in red: scales and chords
+  on a keyboard (a progression also gets a strip of its chords; hover one to see it),
+  rhythms as a step grid, notes as a small piano roll. While playing, the current chord
+  and step light up. Hover a preview for the text version.
+- To hear a scale, chord, progression or rhythm without wiring it up, click ▶ on its
+  preview or click the name of its output. A scale plays as a run, chords as blocks and
+  a rhythm as clicks, through a preview instrument, even while the song plays.
+- Hover a wire to see what it carries: the value on that output, drawn like a preview,
+  with its text. Wires into and out of groups show the value from the node that makes it.
 - Space plays and stops; edits apply while playing. Del removes, Ctrl+D duplicates,
   F frames everything, the mouse wheel zooms, dragging the background pans and
   Shift-dragging selects a box of nodes. Ctrl+Z and Ctrl+Y undo and redo.

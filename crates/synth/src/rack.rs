@@ -75,6 +75,8 @@ pub enum AudioMsg {
     Events(Vec<TimedEvent>),
     /// Drop queued events and release every voice.
     Stop,
+    /// Drop queued events for these modules and release their voices.
+    Silence(Vec<u64>),
 }
 
 enum Proc {
@@ -223,6 +225,12 @@ impl Rack {
             AudioMsg::Stop => {
                 self.queue.clear();
                 for s in self.slots.iter_mut() {
+                    s.proc.release_all();
+                }
+            }
+            AudioMsg::Silence(ids) => {
+                self.queue.retain(|e| !ids.contains(&e.module));
+                for s in self.slots.iter_mut().filter(|s| ids.contains(&s.id)) {
                     s.proc.release_all();
                 }
             }
@@ -487,6 +495,17 @@ mod tests {
         rack.render(0.0, &mut out);
         rack.handle(AudioMsg::Stop);
         assert_eq!(rack.queued_events(), 0);
+    }
+
+    #[test]
+    fn silence_drops_only_its_modules() {
+        let mut rack = Rack::new(SR);
+        rack.handle(AudioMsg::Rack(desc()));
+        let mut other = on(5.0, 3);
+        other.module = 9;
+        rack.handle(AudioMsg::Events(vec![on(4.0, 1), other, on(6.0, 2)]));
+        rack.handle(AudioMsg::Silence(vec![1]));
+        assert_eq!(rack.queued_events(), 1);
     }
 
     #[test]

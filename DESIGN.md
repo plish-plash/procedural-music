@@ -164,7 +164,7 @@ The window has three areas: the node canvas in the center, an inspector on the r
 - **Live previews on nodes.** A Scale node shows a one-octave keyboard, a Chord node its notes, a Rhythm node a step grid with a moving playhead. Previews light up in time with playback.
 - **Audition anything.** Clicking a theory output plays it once (a scale as a run, a chord as a block) through a preview instrument, without wiring it to an output.
 - **Live editing.** Changes take effect at the next evaluation window, with no stop or recompile; an optional "quantize edits to bar" setting avoids mid-bar jumps.
-- **Probe.** Hovering any wire shows its current value; pinning a probe opens a piano roll for that wire.
+- **Probe.** Hovering any wire shows its current value.
 - **Theory views.** Circle of fifths, Tonnetz and interval matrix can be docked as panels and follow the current harmony.
 - **Search-to-add.** Typing on the canvas opens a node search that filters by the type of the wire being dragged.
 - **Undo history** across graph and parameter edits; presets per node; per-node seed with lock and reroll.

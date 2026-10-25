@@ -15,14 +15,22 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
 use pm_synth::{AudioMsg, NoteEvent, RackDesc, TimedEvent};
-use pm_theory::{Meter, Ticks, PPQ};
+use pm_theory::{Meter, Note, Ticks, PPQ};
 
-use crate::graph::{section_key, CompileReport, EvalContext, Graph, GraphDoc, SinkOutput};
+use crate::audition;
+use crate::graph::{
+    describe, section_key, value_view, CompileReport, EvalContext, Graph, GraphDoc, SinkOutput,
+};
+use crate::json::Json;
 use crate::nodes::Sink;
 use crate::rng;
+use crate::value::Value;
 
 /// Port name meaning "the first MIDI port the app finds".
 pub const DEFAULT_PORT: &str = "";
+
+/// How many bars the editor's previews (and probes and auditions) evaluate.
+const PREVIEW_BARS: u32 = 4;
 
 /// Bytes to send to a named MIDI port.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,7 +157,10 @@ impl Song {
             });
             start += length;
         }
-        let racks = graphs.iter().map(Graph::rack_desc).collect();
+        let racks = graphs
+            .iter()
+            .map(|g| audition::with_preview(g.rack_desc()))
+            .collect();
         Song {
             graphs,
             racks,
@@ -392,7 +403,30 @@ impl Engine {
             Some(s) => (&song.graphs[s.graph], s.key, s.repeat),
             None => (song.base(), 0, 0),
         };
-        graph.report_section(self.meter, 4, self.synchronous, key, repeat)
+        graph.report_section(self.meter, PREVIEW_BARS, self.synchronous, key, repeat)
+    }
+
+    /// The value on one of a node's outputs as the editor shows it (over the preview
+    /// window, as heard in the section in focus), and the tempo there.
+    fn focused_value(&self, node: &str, port: Option<&str>) -> Result<(Value, f64), String> {
+        let song = self.pending_song.as_ref().unwrap_or(&self.song);
+        let (graph, key, repeat, bpm) = match self.focus.and_then(|f| song.sections.get(f)) {
+            Some(s) => (&song.graphs[s.graph], s.key, s.repeat, s.bpm.unwrap_or(self.bpm)),
+            None => (song.base(), 0, 0, self.bpm),
+        };
+        let ctx = EvalContext::preview(self.meter, PREVIEW_BARS, self.synchronous, key, repeat);
+        Ok((graph.output_value(node, port, &ctx)?, bpm))
+    }
+
+    /// What is on one of a node's outputs: a text description and, where one can be
+    /// drawn, a view (as in the report). For hovering over a wire.
+    pub fn probe(&self, node: &str, port: Option<&str>) -> Result<(String, Option<Json>), String> {
+        let (value, _) = self.focused_value(node, port)?;
+        let window = self.meter.ticks_per_bar() * PREVIEW_BARS;
+        Ok((
+            describe(&value, self.meter),
+            value_view(&value, self.meter, window),
+        ))
     }
 
     /// Previews and views of the current graph (for refreshing after background work).
@@ -839,32 +873,61 @@ impl Engine {
         }
     }
 
+    /// A built-in instrument's note-on and note-off for `note`, at times in seconds.
+    fn instrument_events(&mut self, module: u64, note: &Note, on: f64, off: f64) -> [TimedEvent; 2] {
+        let id = self.next_note_id;
+        self.next_note_id += 1;
+        let (key, _) = note.pitch.tuning().to_midi(note.pitch.step());
+        [
+            TimedEvent {
+                at: on,
+                module,
+                event: NoteEvent::On {
+                    id,
+                    freq: note.pitch.frequency() as f32,
+                    key: key.clamp(0, 127) as u8,
+                    velocity: note.velocity.clamp(1, 127),
+                },
+            },
+            TimedEvent {
+                at: off,
+                module,
+                event: NoteEvent::Off { id },
+            },
+        ]
+    }
+
+    /// Plays one of a node's outputs once through the preview instruments, as heard in
+    /// the section in focus, cutting off any audition still sounding. Works whether or
+    /// not the transport is playing. Returns the audition's length in seconds.
+    pub fn audition(&mut self, now: f64, node: &str, port: Option<&str>) -> Result<f64, String> {
+        let (value, bpm) = self.focused_value(node, port)?;
+        let notes = audition::notes(&value, self.meter)?;
+        let seconds = |t: Ticks| t as f64 * 60.0 / (bpm * PPQ as f64);
+        // A little ahead, so the first note isn't already late when the audio thread sees it.
+        let start = now + 0.03;
+        let mut events = Vec::with_capacity(2 * notes.len());
+        let mut end = start;
+        for (module, note) in &notes {
+            let off = start + seconds(note.end());
+            end = end.max(off);
+            events.extend(self.instrument_events(*module, note, start + seconds(note.start), off));
+        }
+        events.sort_by(|a, b| a.at.total_cmp(&b.at));
+        self.audio
+            .push(AudioMsg::Silence(vec![audition::SYNTH, audition::DRUMS]));
+        self.audio.push(AudioMsg::Events(events));
+        Ok(end - start)
+    }
+
     fn queue_sink(&mut self, sink: SinkOutput) {
         let (port, channel) = match sink.sink {
             Sink::Midi { port, channel } => (port, channel & 0x0f),
             Sink::Instrument => {
                 for note in sink.notes {
-                    let id = self.next_note_id;
-                    self.next_note_id += 1;
-                    let (key, _) = note.pitch.tuning().to_midi(note.pitch.step());
-                    let on = NoteEvent::On {
-                        id,
-                        freq: note.pitch.frequency() as f32,
-                        key: key.clamp(0, 127) as u8,
-                        velocity: note.velocity.clamp(1, 127),
-                    };
-                    let at = self.time_of(note.start);
-                    self.audio_events.push(TimedEvent {
-                        at,
-                        module: sink.module,
-                        event: on,
-                    });
-                    let at = self.time_of(note.end());
-                    self.audio_events.push(TimedEvent {
-                        at,
-                        module: sink.module,
-                        event: NoteEvent::Off { id },
-                    });
+                    let (on, off) = (self.time_of(note.start), self.time_of(note.end()));
+                    let events = self.instrument_events(sink.module, &note, on, off);
+                    self.audio_events.extend(events);
                 }
                 return;
             }
@@ -1049,6 +1112,56 @@ mod tests {
             now += 0.001;
         }
         sent
+    }
+
+    #[test]
+    fn audition_plays_through_the_preview_synth() {
+        let mut e = Engine::new();
+        e.set_graph(&doc("drum", &[]));
+        e.take_audio();
+        // A one-beat rhythm at 120 bpm loops to fill a bar: hits 0.5 s apart.
+        e.set_bpm(0.0, 120.0);
+        e.take_audio();
+        let seconds = e.audition(10.0, "p", None).unwrap();
+        assert!(seconds > 1.5 && seconds < 2.0, "{seconds}");
+        let msgs = e.take_audio();
+        assert_eq!(msgs[0], AudioMsg::Silence(vec![audition::SYNTH, audition::DRUMS]));
+        let AudioMsg::Events(events) = &msgs[1] else {
+            panic!("{msgs:?}")
+        };
+        let ons: Vec<f64> = events
+            .iter()
+            .filter(|ev| matches!(ev.event, NoteEvent::On { .. }))
+            .map(|ev| ev.at)
+            .collect();
+        assert_eq!(ons.len(), 4);
+        assert!(events.iter().all(|ev| ev.module == audition::DRUMS));
+        assert!((ons[1] - ons[0] - 0.5).abs() < 1e-9);
+        assert!(ons[0] > 10.0);
+        // The output of a node that isn't there, or that makes notes, is refused.
+        assert!(e.audition(10.0, "nope", None).is_err());
+        assert!(e.audition(10.0, "d", None).is_err());
+        // Every rack carries the preview instruments.
+        e.set_graph(&doc("drum", &[]));
+        let rack = e.take_audio().into_iter().find_map(|m| match m {
+            AudioMsg::Rack(r) => Some(r),
+            _ => None,
+        });
+        assert!(rack.unwrap().modules.iter().any(|m| m.id == audition::SYNTH));
+    }
+
+    #[test]
+    fn probe_shows_any_output() {
+        let mut e = Engine::new();
+        e.set_graph(&doc("drum", &[]));
+        let (text, view) = e.probe("p", Some("rhythm")).unwrap();
+        assert_eq!(text, "x...");
+        assert_eq!(view.unwrap().get("kind").unwrap().as_str(), Some("steps"));
+        let (text, view) = e.probe("d", None).unwrap();
+        assert!(text.starts_with("16 notes in bars 1–4"), "{text}");
+        assert_eq!(view.unwrap().get("kind").unwrap().as_str(), Some("roll"));
+        assert_eq!(e.probe("p", Some("nope")).unwrap_err(), "no output 'nope'");
+        assert_eq!(e.probe("o", None).unwrap_err(), "this node has no output");
     }
 
     #[test]

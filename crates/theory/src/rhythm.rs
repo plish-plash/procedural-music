@@ -124,6 +124,11 @@ impl Rhythm {
         self.length
     }
 
+    /// The step size the rhythm was built on (a display hint).
+    pub fn grid(&self) -> Ticks {
+        self.grid
+    }
+
     pub fn onsets(&self) -> &[Onset] {
         &self.onsets
     }

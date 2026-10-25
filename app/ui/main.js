@@ -107,6 +107,7 @@ function schedulePush() {
 }
 
 async function pushGraph() {
+  pushTimer = null;
   try {
     const report = await api.call('set_graph', { doc: editor.doc, focus: editor.focus, quantize: mode === 'perform' });
     editor.setReport(report);
@@ -222,6 +223,31 @@ async function togglePlay() {
     await api.call('play');
   }
   await pollStatus();
+}
+
+/** Plays a node's output once through the preview instrument; resolves to its length in seconds. */
+async function audition(node, port) {
+  try {
+    // Make sure the engine has the latest edits first.
+    if (pushTimer) {
+      clearTimeout(pushTimer);
+      await pushGraph();
+    }
+    const { seconds } = await api.call('audition', { node, port });
+    return seconds;
+  } catch (e) {
+    setStatus(`Can't play that: ${e.message ?? e}`);
+    return null;
+  }
+}
+
+/** What is on one of a node's outputs: { text, view } or { error }. */
+async function probe(node, port) {
+  try {
+    return await api.call('probe', { node, port });
+  } catch (e) {
+    return { error: String(e.message ?? e) };
+  }
 }
 
 async function seek(tick) {
@@ -434,6 +460,8 @@ async function init() {
     specs,
     onChange,
     onLibrarySave: saveToLibrary,
+    onAudition: audition,
+    onProbe: probe,
   });
   timeline = new Timeline({
     root: $('timeline'),

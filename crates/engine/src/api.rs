@@ -123,6 +123,21 @@ pub fn handle(
             );
             Ok(Reply::json(status_json(engine, now)))
         }
+        "audition" => {
+            let node = args.get("node").and_then(Json::as_str).ok_or("missing node")?;
+            let port = args.get("port").and_then(Json::as_str);
+            let seconds = engine.audition(now, node, port)?;
+            Ok(Reply::json(Json::obj(vec![("seconds", Json::Num(seconds))])))
+        }
+        "probe" => {
+            let node = args.get("node").and_then(Json::as_str).ok_or("missing node")?;
+            let port = args.get("port").and_then(Json::as_str);
+            let (text, view) = engine.probe(node, port)?;
+            Ok(Reply::json(Json::obj(vec![
+                ("text", Json::str(text)),
+                ("view", view.unwrap_or(Json::Null)),
+            ])))
+        }
         "status" => Ok(Reply::json(status_json(engine, now))),
         "report" => Ok(Reply::json(report_json(&engine.report()))),
         other => Err(format!("unknown command '{other}'")),
