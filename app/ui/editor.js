@@ -15,16 +15,18 @@
 // automatable parameter gets an input port named `param.<name>` that a Control can drive.
 
 import { el, svg } from './dom.js';
-import { renderCurve, renderKeys, renderPlain, renderRoll, renderStaff, renderSteps, showPlayhead } from './views.js';
+import { renderCurve, renderKeys, renderPlain, renderRoll, renderStaff, renderSteps, renderTheory, showPlayhead } from './views.js';
 
 export { el, svg };
 
 const WIDE = new Set(['progression', 'voice', 'voice_lead', 'drop', 'invert', 'play_chords', 'transpose', 'chord',
-  'switch_notes', 'switch_rhythm', 'switch_chord', 'switch_scale']);
+  'switch_notes', 'switch_rhythm', 'switch_chord', 'switch_scale', 'tonnetz', 'interval_matrix']);
 const XWIDE = new Set(['counterpoint', 'piano_roll']);
 const IN = '@in';
 const OUT = '@out';
 export const PARAM_PORT = 'param.';
+// Marks clipboard text as nodes copied from this editor.
+const CLIPBOARD_FORMAT = 'procedural-music/nodes@1';
 
 const TYPE_COLOR = { scale: '#40d2be', chord: '#f5b446', rhythm: '#ff7aa8', notes: '#6e96ff', audio: '#b8e06a', control: '#b48cff', any: '#8a93a3' };
 // Output types that can be auditioned with a click.
@@ -373,6 +375,61 @@ export class Editor {
     }
     this.selection.clear();
     this.updateWires();
+    this.changed(true);
+  }
+
+  // ---- Copy and paste ----------------------------------------------------------------
+  // The clipboard holds the selected nodes and the wires between them, as JSON text, so
+  // they paste into any graph or group, in this window or another.
+
+  /** Copies (or cuts) the selected nodes to the clipboard. */
+  copy(e, cut) {
+    const ids = new Set([...this.selection].filter((id) => id !== IN && id !== OUT));
+    if (!ids.size) return;
+    const nodes = this.g.nodes.filter((n) => ids.has(n.id)).map((n) => structuredClone(n));
+    const wires = this.g.wires.filter((w) => ids.has(w.from.node) && ids.has(w.to.node)).map((w) => structuredClone(w));
+    const text = JSON.stringify({ format: CLIPBOARD_FORMAT, nodes, wires });
+    e.preventDefault();
+    e.clipboardData.setData('text/plain', text);
+    this.clipboard = text;
+    if (cut) this.removeSelection();
+  }
+
+  /** Pastes nodes from the clipboard under the mouse (or in the middle of the view). */
+  paste(e) {
+    const text = e.clipboardData?.getData('text/plain') || this.clipboard;
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (data?.format !== CLIPBOARD_FORMAT || !data.nodes?.length) return;
+    e.preventDefault();
+    // Place the copied nodes' top-left corner at the mouse, if it's over the canvas.
+    const r = this.canvas.getBoundingClientRect();
+    const p = this.pointer;
+    const over = p && p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom;
+    const at = over ? this.toWorld(p.x, p.y) : this.toWorld(r.left + r.width / 3, r.top + r.height / 3);
+    const minX = Math.min(...data.nodes.map((n) => n.x ?? 0));
+    const minY = Math.min(...data.nodes.map((n) => n.y ?? 0));
+    const map = {};
+    const fresh = [];
+    for (const src of normalizeNodes(data.nodes)) {
+      const n = { ...src, id: this.nextId(), x: Math.round(src.x - minX + at.x), y: Math.round(src.y - minY + at.y) };
+      map[src.id] = n.id;
+      this.g.nodes.push(n);
+      this.nodesEl.append(this.renderNode(n));
+      fresh.push(n.id);
+    }
+    for (const w of data.wires ?? []) {
+      if (map[w.from?.node] && map[w.to?.node]) {
+        this.g.wires.push({ from: { node: map[w.from.node], port: w.from.port }, to: { node: map[w.to.node], port: w.to.port } });
+      }
+    }
+    this.emptyHint.hidden = true;
+    this.select(fresh);
+    requestAnimationFrame(() => this.updateWires());
     this.changed(true);
   }
 
@@ -1158,7 +1215,7 @@ export class Editor {
     if (data.kind === 'keys') return [renderKeys(data)];
     if (data.kind === 'steps') return [renderSteps(data)];
     if (data.kind === 'curve') return [renderCurve(data)];
-    if (data.kind !== 'roll') return [];
+    if (data.kind !== 'roll') return renderTheory(data);
     if (data.compact) return renderRoll(data);
     const mode = this.rollMode[flat] ?? 'roll';
     const staffable = (data.notes ?? []).every((n) => /^[A-G]/.test(n.name));
@@ -1448,6 +1505,11 @@ export class Editor {
         this.enter([...this.selection][0]);
       }
     });
+    // Copy, cut and paste nodes (the clipboard events work without clipboard permissions).
+    const onCanvas = (e) => !isTyping(e) && (document.activeElement === c || c.contains(document.activeElement));
+    document.addEventListener('copy', (e) => { if (onCanvas(e)) this.copy(e, false); });
+    document.addEventListener('cut', (e) => { if (onCanvas(e)) this.copy(e, true); });
+    document.addEventListener('paste', (e) => { if (onCanvas(e)) this.paste(e); });
     this.addSearch.addEventListener('input', () => this.fillAddList());
     this.addSearch.addEventListener('keydown', (e) => this.onMenuKey(e));
     document.addEventListener('pointerdown', (e) => {
@@ -1536,6 +1598,7 @@ export class Editor {
   }
 
   onMove(e) {
+    this.pointer = { x: e.clientX, y: e.clientY };
     const d = this.drag;
     if (!d) return;
     if (d.kind === 'pan') {
@@ -1630,8 +1693,8 @@ export class Editor {
   openAddMenu(clientX, clientY, pending) {
     if (pending?.type === 'any') return;
     this.menu = { at: this.toWorld(clientX, clientY), pending, active: 0, items: [] };
-    const w = 300;
-    const h = 420;
+    const w = 440;
+    const h = 480;
     this.addMenu.style.left = `${Math.min(clientX, window.innerWidth - w - 8)}px`;
     this.addMenu.style.top = `${Math.min(clientY, window.innerHeight - h - 8)}px`;
     this.addMenu.hidden = false;

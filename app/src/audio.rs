@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, Sample, SizedSample};
+use cpal::{FromSample, SizedSample};
 use pm_synth::{AudioMsg, Rack};
 
 #[derive(Clone, Debug, Default)]

@@ -33,6 +33,14 @@ export function renderPlain(v) {
   if (v?.kind === 'steps') return [renderSteps(v)];
   if (v?.kind === 'curve') return [renderCurve(v)];
   if (v?.kind === 'roll') return renderRoll(v);
+  return renderTheory(v);
+}
+
+/** The theory views (circle of fifths, Tonnetz, interval matrix), or nothing. */
+export function renderTheory(v) {
+  if (v?.kind === 'circle') return [renderCircle(v)];
+  if (v?.kind === 'tonnetz') return [renderTonnetz(v)];
+  if (v?.kind === 'intervals') return [renderIntervals(v)];
   return [];
 }
 
@@ -364,6 +372,200 @@ export function renderStaff(v) {
   issueLinks(v, root, (n) => ({ x: x(n.t), y: y(parseName(n.name).step) }));
   root.append(svg('line', { x1: 0, x2: 0, y1: 0, y2: height, class: 'roll-playhead', visibility: 'hidden', 'data-length': v.length, 'data-left': left + 6 }));
   return [head, root, legend(v, notes)];
+}
+
+// ---- Theory views ------------------------------------------------------------------
+// Each gets {chords, key}: keyboard views (timelines of segments with `keys`: MIDI notes
+// for chords, pitch classes for a key), either of which may be null.
+
+const PC_NAMES = ['C', 'D♭', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B'];
+const pcOf = (k) => ((k % 12) + 12) % 12;
+
+function theoryEmpty() {
+  return el('div', { class: 'theory-empty' }, 'Wire in chords (or add a Harmonic context).');
+}
+
+/** Calls `draw(chord segment index, key segment index)` (-1: none) whenever the playhead
+ * moves into another chord or key, and once to start. */
+function followSegments(wrap, v, draw) {
+  let last = null;
+  wrap.showAt = (tick) => {
+    const ci = v.chords ? segmentAt(v.chords, tick) : -1;
+    const ki = v.key ? segmentAt(v.key, tick) : -1;
+    if (`${ci}/${ki}` === last) return;
+    last = `${ci}/${ki}`;
+    draw(ci, ki);
+  };
+  wrap.showAt(null);
+}
+
+/**
+ * The circle of fifths: the key's notes around the rim (its tonic stronger), the sounding
+ * chord's notes joined as a shape inside, and the path its roots take through the
+ * progression.
+ */
+export function renderCircle(v) {
+  if (!v.chords && !v.key) return theoryEmpty();
+  const S = 210;
+  const c = S / 2;
+  const R = 86;
+  const r = 60;
+  const at = (pc, rad) => {
+    const a = (((pc * 7) % 12) * 30 - 90) * (Math.PI / 180);
+    return [c + rad * Math.cos(a), c + rad * Math.sin(a)];
+  };
+  const root = svg('svg', { class: 'theory circle', viewBox: `0 0 ${S} ${S}`, width: S, height: S });
+  root.append(svg('circle', { cx: c, cy: c, r: R, class: 'cf-ring' }), svg('circle', { cx: c, cy: c, r, class: 'cf-ring inner' }));
+  // The chord roots' path through the progression.
+  if (v.chords?.segs.length > 1) {
+    const roots = v.chords.segs.map((s) => s.root ?? pcOf(Math.min(...s.keys)));
+    root.append(svg('polyline', { class: 'cf-path', points: roots.map((pc) => at(pc, r * 0.55).join(',')).join(' ') }));
+  }
+  const shape = svg('polygon', { class: 'cf-chord' });
+  root.append(shape);
+  const rim = new Map();
+  const inner = new Map();
+  for (let pc = 0; pc < 12; pc++) {
+    const [x, y] = at(pc, R);
+    const dot = svg('circle', { cx: x, cy: y, r: 12, class: 'cf-key' });
+    const t = svg('text', { x, y: y + 4, class: 'cf-name', 'text-anchor': 'middle' });
+    t.textContent = PC_NAMES[pc];
+    const [ix, iy] = at(pc, r);
+    const note = svg('circle', { cx: ix, cy: iy, r: 4, class: 'cf-note' });
+    rim.set(pc, dot);
+    inner.set(pc, note);
+    root.append(dot, t, note);
+  }
+  const label = el('div', { class: 'theory-label' });
+  const wrap = el('div', { class: 'theory-view', dataset: { preview: 'circle' } }, label, root);
+  followSegments(wrap, v, (ci, ki) => {
+    const key = ki >= 0 ? v.key.segs[ki] : null;
+    const keyPcs = new Set((key?.keys ?? []).map(pcOf));
+    for (const [pc, dot] of rim) {
+      dot.classList.toggle('on', keyPcs.has(pc));
+      dot.classList.toggle('tonic', key?.root === pc);
+    }
+    const seg = ci >= 0 ? v.chords.segs[ci] : null;
+    const pcs = [...new Set((seg?.keys ?? []).map(pcOf))].sort((a, b) => ((a * 7) % 12) - ((b * 7) % 12));
+    for (const [pc, note] of inner) {
+      note.classList.toggle('on', pcs.includes(pc));
+      note.classList.toggle('root', seg?.root === pc);
+    }
+    shape.setAttribute('points', pcs.map((pc) => at(pc, r).join(',')).join(' '));
+    label.textContent = [key?.label, seg?.label].filter(Boolean).join(' · ');
+  });
+  return wrap;
+}
+
+/**
+ * The Tonnetz: notes on a lattice with fifths running across and major thirds up, so
+ * each upward triangle is a major triad and each downward one a minor triad. The sounding
+ * chord's notes and triads light up; the previous chord's triads stay faintly lit.
+ */
+export function renderTonnetz(v) {
+  if (!v.chords) return theoryEmpty();
+  const cols = 9;
+  const rows = 4;
+  const w = 28;
+  const h = 26;
+  const pad = 13;
+  // Centred on C: column 4 of the second row.
+  const pcAt = (x, y) => pcOf(7 * (x - 4) + 4 * (y - 1));
+  const px = (x, y) => pad + x * w + y * (w / 2);
+  const py = (y) => pad + (rows - 1 - y) * h;
+  const W = 2 * pad + (cols - 1) * w + (rows - 1) * (w / 2);
+  const H = 2 * pad + (rows - 1) * h;
+  const root = svg('svg', { class: 'theory tonnetz', viewBox: `0 0 ${W} ${H}`, width: W, height: H });
+  const triangles = [];
+  for (let y = 0; y < rows - 1; y++) {
+    for (let x = 0; x < cols - 1; x++) {
+      const up = [[x, y], [x + 1, y], [x, y + 1]];
+      const down = [[x + 1, y], [x, y + 1], [x + 1, y + 1]];
+      for (const tri of [up, down]) {
+        const poly = svg('polygon', { class: 'tz-tri', points: tri.map(([a, b]) => `${px(a, b)},${py(b)}`).join(' ') });
+        triangles.push({ el: poly, pcs: tri.map(([a, b]) => pcAt(a, b)) });
+        root.append(poly);
+      }
+    }
+  }
+  const nodes = [];
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const pc = pcAt(x, y);
+      const dot = svg('circle', { cx: px(x, y), cy: py(y), r: 9, class: 'tz-node' });
+      const t = svg('text', { x: px(x, y), y: py(y) + 3.5, class: 'tz-name', 'text-anchor': 'middle' });
+      t.textContent = PC_NAMES[pc];
+      nodes.push({ el: dot, pc });
+      root.append(dot, t);
+    }
+  }
+  const label = el('div', { class: 'theory-label' });
+  const wrap = el('div', { class: 'theory-view', dataset: { preview: 'tonnetz' } }, label, root);
+  const pcsOf = (i) => new Set((v.chords.segs[i]?.keys ?? []).map(pcOf));
+  followSegments(wrap, v, (ci) => {
+    const now = pcsOf(ci);
+    const n = v.chords.segs.length;
+    const before = n > 1 ? pcsOf((ci - 1 + n) % n) : new Set();
+    for (const t of triangles) {
+      t.el.classList.toggle('on', t.pcs.every((pc) => now.has(pc)));
+      t.el.classList.toggle('prev', n > 1 && t.pcs.every((pc) => before.has(pc)));
+    }
+    for (const d of nodes) d.el.classList.toggle('on', now.has(d.pc));
+    label.textContent = v.chords.segs[ci]?.label ?? '';
+  });
+  return wrap;
+}
+
+const INTERVAL_NAMES = ['P1', 'm2', 'M2', 'm3', 'M3', 'P4', 'TT', 'P5', 'm6', 'M6', 'm7', 'M7'];
+
+/** How an interval of `st` semitones sounds, for colouring. */
+function intervalQuality(st) {
+  const c = pcOf(st);
+  if (c === 0 || c === 7) return 'perfect';
+  if (c === 5) return 'fourth';
+  if ([3, 4, 8, 9].includes(c)) return 'consonant';
+  return 'dissonant';
+}
+
+/**
+ * The interval matrix of the sounding chord: the interval between every two of its notes,
+ * low to high, coloured by how it sounds, and the chord's interval-class vector (how many
+ * semitones, whole tones, minor thirds, major thirds, fourths and tritones it holds).
+ */
+export function renderIntervals(v) {
+  if (!v.chords) return theoryEmpty();
+  const label = el('div', { class: 'theory-label' });
+  const body = el('div', { class: 'iv-body' });
+  const wrap = el('div', { class: 'theory-view', dataset: { preview: 'intervals' } }, label, body);
+  followSegments(wrap, v, (ci) => {
+    const seg = v.chords.segs[ci];
+    const keys = [...new Set(seg?.keys ?? [])].sort((a, b) => a - b);
+    label.textContent = seg?.label ?? '';
+    const name = (k) => `${PC_NAMES[pcOf(k)]}${Math.floor(k / 12) - 1}`;
+    const head = el('tr', {}, el('th', {}), ...keys.map((k) => el('th', {}, name(k))));
+    const rowsEls = keys.map((a, i) => el('tr', {}, el('th', {}, name(a)), ...keys.map((b, j) => {
+      if (j <= i) return el('td', { class: 'iv-blank' });
+      const st = b - a;
+      // Beyond an octave, the simple interval with "+8" (a compound interval).
+      const text = st === 12 ? 'P8' : `${INTERVAL_NAMES[st % 12]}${st > 12 ? '+8' : ''}`;
+      return el('td', { class: `iv-${intervalQuality(st)}`, title: `${st} semitone${st === 1 ? '' : 's'}` }, text);
+    })));
+    // Interval-class vector: each pair's distance around the octave, folded to 1..6.
+    const vec = [0, 0, 0, 0, 0, 0];
+    const pcs = [...new Set(keys.map(pcOf))];
+    for (let i = 0; i < pcs.length; i++) {
+      for (let j = i + 1; j < pcs.length; j++) {
+        const d = pcOf(pcs[j] - pcs[i]);
+        vec[Math.min(d, 12 - d) - 1] += 1;
+      }
+    }
+    const icNames = ['m2', 'M2', 'm3', 'M3', 'P4', 'TT'];
+    const vector = el('div', { class: 'iv-vector', title: 'Interval-class vector: how many of each interval the chord holds (inversions count as the same, so a P5 counts as a P4)' },
+      el('span', { class: 'iv-vec-label' }, `⟨${vec.join('')}⟩`),
+      ...vec.map((n, i) => el('span', { class: `iv-ic iv-${intervalQuality(i + 1)}` }, el('b', {}, String(n)), icNames[i])));
+    body.replaceChildren(el('table', { class: 'iv-table' }, head, ...rowsEls), vector);
+  });
+  return wrap;
 }
 
 // ---- Control curves ----------------------------------------------------------------

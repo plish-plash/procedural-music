@@ -1,5 +1,6 @@
 //! The node catalog: specs (shared with the UI) and implementations.
 
+mod analysis;
 mod control;
 mod counterpoint;
 mod melody;
@@ -141,6 +142,9 @@ static SPECS: &[&NodeSpec] = &[
     // Counterpoint and analysis
     &counterpoint::COUNTERPOINT,
     &counterpoint::PIANO_ROLL,
+    &analysis::CIRCLE,
+    &analysis::TONNETZ,
+    &analysis::INTERVALS,
     // Control
     &control::LFO,
     &control::RAMP,
@@ -208,6 +212,7 @@ pub fn build(
         "counterpoint" => counterpoint::build_counterpoint(&p),
         "split_voices" => counterpoint::build_split(&p),
         "piano_roll" => counterpoint::build_piano_roll(&p),
+        "circle_of_fifths" | "tonnetz" | "interval_matrix" => analysis::build(spec.kind, &p),
         "lfo" => control::build_lfo(&p),
         "ramp" => control::build_ramp(&p),
         "steps" => control::build_steps(&p),

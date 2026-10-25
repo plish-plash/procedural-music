@@ -25,15 +25,15 @@ cargo run --manifest-path app\Cargo.toml
 The first build downloads and compiles Tauri, which takes a few minutes.
 
 The examples play through the built-in instruments on your default audio output. To
-drive external synths instead, end a chain in **MIDI out** and pick the port; set **Clock**
-in the toolbar to send MIDI clock. **Export WAV** renders the built-in instruments to a
+drive external synths instead, end a chain in **MIDI out** and pick the port; set **MIDI ▾ › Clock out**
+to send MIDI clock (**Refresh ports** is there too). **File ▾ › Export WAV audio** renders the built-in instruments to a
 file faster than real time.
 
 ### Using the editor
 
-- **New ▾ › Song** starts from a template: drums, bass, pads and lead as groups, fed by one
-  progression, with a short arrangement. **New ▾ › Empty patch** gives a blank canvas.
-- **Examples ▾** loads the demo patches: *Full song*, *Modal explorer*, *Progression to pads*,
+- **File ▾ › New song** starts from a template: drums, bass, pads and lead as groups, fed by one
+  progression, with a short arrangement. **New empty patch** gives a blank canvas.
+- **File ▾ › Examples** loads the demo patches: *Full song*, *Modal explorer*, *Progression to pads*,
   *Full band*, *First species*, *Chorale* (all on the built-in synths) and *Full band (MIDI)*.
 - Double-click the canvas (or press Tab) to add a node; type to search.
 - Drag from an output dot to an input dot to connect. Drop a wire on empty canvas to
@@ -75,11 +75,17 @@ file faster than real time.
   a rhythm as clicks, through a preview instrument, even while the song plays.
 - Hover a wire to see what it carries: the value on that output, drawn like a preview,
   with its text. Wires into and out of groups show the value from the node that makes it.
+- **Analysis** nodes show harmony as it plays: *Circle of fifths* (the key on the rim,
+  the chord as a shape, the path of the roots), *Tonnetz* (the chord's triads on the
+  grid of fifths and thirds) and *Interval matrix* (every interval in the chord, and its
+  interval-class vector). Unwired, they show the Harmonic context.
+- Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste nodes (with the wires between them), into
+  any graph or group, and between windows; pasted nodes land under the mouse.
 - Space plays and stops; edits apply while playing. Del removes, Ctrl+D duplicates,
   F frames everything, the mouse wheel zooms, dragging the background pans and
   Shift-dragging selects a box of nodes. Ctrl+Z and Ctrl+Y undo and redo.
 - Ctrl+S saves a `.pmpatch` file; the current patch is also autosaved between sessions.
-- **Export ▾** renders the song to a WAV file, or writes a standard MIDI file with one
+- **File ▾ › Export** renders the song to a WAV file, or writes a standard MIDI file with one
   track per part (named after its group) and the tempo changes.
 
 ### Groups

@@ -157,6 +157,7 @@ async function load(doc, path = null, isDirty = false) {
   $('bpm').value = bpm;
   await api.call('set_bpm', { bpm });
   $('clock-port').value = doc.clockPort ?? '';
+  showClock();
   await api.call('set_clock_ports', { ports: doc.clockPort ? [doc.clockPort] : [] });
   timeline.focus = null;
   timeline.setSectionEdit(false);
@@ -180,10 +181,18 @@ async function refreshPorts() {
     const current = editor.doc.clockPort ?? '';
     clock.replaceChildren(new Option('Off', ''), ...ports.map((p) => new Option(p, p)));
     clock.value = ports.includes(current) ? current : '';
+    showClock();
     setStatus(ports.length ? `MIDI ports: ${ports.join(', ')}` : 'No MIDI output ports found', ports.length > 0);
   } catch (e) {
     setStatus(`Couldn't list MIDI ports: ${e.message ?? e}`);
   }
+}
+
+/** Marks the MIDI menu button while clock out is on. */
+function showClock() {
+  const port = $('clock-port').value;
+  $('btn-midi').classList.toggle('on', !!port);
+  $('btn-midi').title = port ? `MIDI clock out: ${port}` : 'MIDI clock and ports';
 }
 
 async function refreshLibrary() {
@@ -470,17 +479,39 @@ async function open() {
   }
 }
 
-/** A toolbar button that opens a dropdown of [title, description, action]. */
-function dropdown(buttonId, menuId, items) {
-  const menu = $(menuId);
-  menu.replaceChildren(...items.map(([title, description, action]) => {
-    const b = el('button', {}, title, el('small', {}, description));
-    b.addEventListener('click', () => {
+/**
+ * Fills a dropdown menu. Entries are `[title, description, action, shortcut]`,
+ * `null` for a separator, or `{ title, items }` for a submenu that opens on hover.
+ */
+function menuItems(menu, items) {
+  return items.map((item) => {
+    if (item === null) return el('hr');
+    if (!Array.isArray(item)) {
+      const sub = el('div', { class: 'dropdown submenu' }, ...menuItems(menu, item.items));
+      return el('div', { class: 'menu-sub' },
+        el('button', { class: 'menu-item' }, el('span', { class: 'mi-title' }, item.title), el('kbd', {}, '▸')),
+        sub);
+    }
+    const [title, description, action, shortcut] = item;
+    const b = el('button', { class: 'menu-item' },
+      el('span', { class: 'mi-title' }, title),
+      shortcut ? el('kbd', {}, shortcut) : null,
+      description ? el('small', {}, description) : null);
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
       menu.hidden = true;
       action();
     });
     return b;
-  }));
+  });
+}
+
+/** A toolbar button that toggles a dropdown; `items` (see `menuItems`) fills it, otherwise its markup stays. */
+function dropdown(buttonId, menuId, items) {
+  const menu = $(menuId);
+  if (items) menu.replaceChildren(...menuItems(menu, items));
+  // Clicks on fields inside the menu (a select) shouldn't close it.
+  menu.addEventListener('click', (e) => e.stopPropagation());
   $(buttonId).addEventListener('click', (e) => {
     e.stopPropagation();
     for (const m of document.querySelectorAll('.dropdown')) if (m !== menu) m.hidden = true;
@@ -527,19 +558,23 @@ async function init() {
     onSectionEdit: (on) => editor.setSectionEdit(on),
   });
 
-  dropdown('btn-examples', 'examples-menu', EXAMPLES.map((ex) => [ex.name, ex.description, async () => {
-    if (!confirmDiscard()) return;
-    await load(structuredClone(ex.doc));
-    setStatus(`Loaded example: ${ex.name}`, true);
-  }]));
-  dropdown('btn-new', 'new-menu', [
-    ['Song', 'Drums, bass, pads and lead as groups, with an arrangement', () => newProject(true)],
-    ['Empty patch', 'A blank canvas', () => newProject(false)],
+  dropdown('btn-file', 'file-menu', [
+    ['New song', 'Drums, bass, pads and lead as groups, with an arrangement', () => newProject(true)],
+    ['New empty patch', null, () => newProject(false)],
+    { title: 'Examples', items: EXAMPLES.map((ex) => [ex.name, ex.description, async () => {
+      if (!confirmDiscard()) return;
+      await load(structuredClone(ex.doc));
+      setStatus(`Loaded example: ${ex.name}`, true);
+    }]) },
+    null,
+    ['Open…', null, open, 'Ctrl+O'],
+    ['Save', null, () => save(false), 'Ctrl+S'],
+    ['Save as…', null, () => save(true), 'Ctrl+Shift+S'],
+    null,
+    ['Export WAV audio…', 'The built-in instruments, rendered faster than real time', () => exportFile('wav')],
+    ['Export MIDI file…', 'One track per part, with tempo changes', () => exportFile('midi')],
   ]);
-  dropdown('btn-export', 'export-menu', [
-    ['WAV audio…', 'The built-in instruments, rendered faster than real time', () => exportFile('wav')],
-    ['MIDI file…', 'One track per part, with tempo changes', () => exportFile('midi')],
-  ]);
+  dropdown('btn-midi', 'midi-menu');
   document.addEventListener('click', () => {
     for (const m of document.querySelectorAll('.dropdown')) m.hidden = true;
   });
@@ -557,8 +592,6 @@ async function init() {
   else await load(structuredClone(EXAMPLES.find((e) => e.name === 'Full song')?.doc ?? EXAMPLES[1].doc));
 
   $('btn-play').addEventListener('click', togglePlay);
-  $('btn-open').addEventListener('click', open);
-  $('btn-save').addEventListener('click', (e) => save(e.shiftKey));
   $('btn-ports').addEventListener('click', refreshPorts);
   $('btn-random-lock').addEventListener('click', toggleProjectLock);
   $('btn-reroll').addEventListener('click', rerollProject);
@@ -575,6 +608,7 @@ async function init() {
   $('clock-port').addEventListener('change', async () => {
     const port = $('clock-port').value;
     editor.doc.clockPort = port || undefined;
+    showClock();
     onChange({ graph: false });
     await api.call('set_clock_ports', { ports: port ? [port] : [] });
   });

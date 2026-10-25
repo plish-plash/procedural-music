@@ -1048,7 +1048,7 @@ impl PortType {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use pm_theory::PPQ;
 

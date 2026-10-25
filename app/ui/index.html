@@ -11,18 +11,8 @@
     <div class="group">
       <span class="brand">Procedural Music</span>
       <div class="menu-wrap">
-        <button id="btn-new" title="New song or empty patch">New ▾</button>
-        <div id="new-menu" class="dropdown" hidden></div>
-      </div>
-      <button id="btn-open" title="Open patch (Ctrl+O)">Open</button>
-      <button id="btn-save" title="Save patch (Ctrl+S; Shift: save as)">Save</button>
-      <div class="menu-wrap">
-        <button id="btn-export" title="Export audio or MIDI">Export ▾</button>
-        <div id="export-menu" class="dropdown" hidden></div>
-      </div>
-      <div class="menu-wrap">
-        <button id="btn-examples">Examples ▾</button>
-        <div id="examples-menu" class="dropdown" hidden></div>
+        <button id="btn-file" title="New, open, save, export and examples">File ▾</button>
+        <div id="file-menu" class="dropdown" hidden></div>
       </div>
       <button id="btn-undo" class="icon-btn" title="Undo (Ctrl+Z)">↶</button>
       <button id="btn-redo" class="icon-btn" title="Redo (Ctrl+Y)">↷</button>
@@ -42,10 +32,15 @@
         <button data-mode="compose" class="on">Compose</button>
         <button data-mode="perform">Perform</button>
       </div>
-      <label class="clock" title="Send MIDI clock and start/stop to this port">Clock
-        <select id="clock-port"><option value="">Off</option></select>
-      </label>
-      <button id="btn-ports" title="Look for MIDI ports again">Refresh ports</button>
+      <div class="menu-wrap">
+        <button id="btn-midi" title="MIDI clock and ports">MIDI ▾</button>
+        <div id="midi-menu" class="dropdown align-right" hidden>
+          <label class="menu-field" title="Send MIDI clock and start/stop to this port">Clock out
+            <select id="clock-port"><option value="">Off</option></select>
+          </label>
+          <button id="btn-ports" class="menu-item"><span class="mi-title">Refresh ports</span><small>Look for MIDI ports again</small></button>
+        </div>
+      </div>
     </div>
   </header>
 
