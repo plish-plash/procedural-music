@@ -146,6 +146,7 @@ static SPECS: &[&NodeSpec] = &[
     &control::RAMP,
     &control::STEPS,
     // Structure
+    &structure::CONTEXT,
     &structure::SWITCH_NOTES,
     &structure::SWITCH_RHYTHM,
     &structure::SWITCH_CHORD,
@@ -210,6 +211,7 @@ pub fn build(
         "lfo" => control::build_lfo(&p),
         "ramp" => control::build_ramp(&p),
         "steps" => control::build_steps(&p),
+        "context" => structure::build_context(&p),
         "switch_notes" | "switch_rhythm" | "switch_chord" | "switch_scale" => {
             structure::build_switch(&p)
         }

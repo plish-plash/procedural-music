@@ -145,6 +145,8 @@ pub struct CompileReport {
     pub previews: Vec<(String, String)>,
     /// (node id, structured view such as a piano roll) for nodes that draw one.
     pub views: Vec<(String, Json)>,
+    /// (node id, input port) for inputs the harmonic context feeds.
+    pub context: Vec<(String, String)>,
 }
 
 /// Notes leaving the graph through one sink node (MIDI out or a built-in instrument).
@@ -218,6 +220,25 @@ pub struct Graph {
     /// For each node, its upstream nodes in evaluation order (for phrase-length inputs).
     ancestors: Vec<Vec<usize>>,
     issues: Vec<NodeIssue>,
+    /// Inputs fed by the harmonic context rather than a wire: (node index, input index).
+    implicit: Vec<(usize, usize)>,
+    /// Whether any parameter is automated (previews then go a slice at a time).
+    automated: bool,
+}
+
+/// Which nodes feed `target`, directly or through others.
+fn feeding(nodes: &[CompiledNode], target: usize) -> Vec<bool> {
+    let mut seen = vec![false; nodes.len()];
+    let mut stack = vec![target];
+    while let Some(i) = stack.pop() {
+        for &(src, _) in nodes[i].inputs.iter().flatten() {
+            if !seen[src] {
+                seen[src] = true;
+                stack.push(src);
+            }
+        }
+    }
+    seen
 }
 
 struct Evaluation {
@@ -303,6 +324,43 @@ impl Graph {
             nodes[to].inputs[ip] = Some((from, op));
         }
 
+        // The harmonic context: scale and chord inputs left unwired read it (a wire always
+        // wins). Nodes that feed the context can't read it, which also rules out loops;
+        // section switches pick among their own inputs, so they don't either.
+        let mut implicit = Vec::new();
+        let contexts: Vec<usize> = (0..nodes.len())
+            .filter(|&i| nodes[i].spec.kind == "context")
+            .collect();
+        if let Some((&c, rest)) = contexts.split_first() {
+            for &other in rest {
+                issues.push(NodeIssue {
+                    node: nodes[other].id.clone(),
+                    message: "only one Harmonic context is used; this one is ignored".into(),
+                });
+            }
+            let feeds = feeding(&nodes, c);
+            for i in 0..nodes.len() {
+                let kind = nodes[i].spec.kind;
+                if feeds[i] || kind == "context" || kind.starts_with("switch_") {
+                    continue;
+                }
+                for (k, port) in nodes[i].spec.inputs.iter().enumerate() {
+                    let out = match port.ty {
+                        PortType::Scale => 0,
+                        PortType::Chord => 1,
+                        _ => continue,
+                    };
+                    if nodes[i].inputs[k].is_none() {
+                        nodes[i].inputs[k] = Some((c, out));
+                        implicit.push((i, k));
+                    }
+                }
+            }
+        }
+        let automated = nodes
+            .iter()
+            .any(|n| n.inputs[n.spec.inputs.len()..].iter().any(Option::is_some));
+
         // Topological order (Kahn). Whatever is left is in a cycle.
         let mut indegree: Vec<usize> = nodes
             .iter()
@@ -354,6 +412,23 @@ impl Graph {
             order,
             ancestors,
             issues,
+            implicit,
+            automated,
+        }
+    }
+
+    /// Whether any parameter is driven by a Control.
+    pub fn is_automated(&self) -> bool {
+        self.automated
+    }
+
+    /// A number parameter of a node as compiled (its default when unset), if it has one.
+    pub fn param_number(&self, node: &str, name: &str) -> Option<f64> {
+        let n = self.nodes.iter().find(|n| n.id == node)?;
+        let spec = n.spec.params.iter().find(|p| p.name == name)?;
+        match n.params.get(name).cloned().unwrap_or_else(|| spec.default_value()) {
+            ParamValue::Number(v) => Some(v),
+            _ => None,
         }
     }
 
@@ -544,6 +619,72 @@ impl Graph {
         self.evaluate_window(ctx).0
     }
 
+    /// Like [`Graph::evaluate`], a `slice` at a time when parameters are automated, so
+    /// automation moves as it does in playback (which evaluates a slice at a time).
+    pub fn evaluate_sliced(&self, ctx: &EvalContext, slice: Ticks) -> Vec<SinkOutput> {
+        if !self.automated {
+            return self.evaluate(ctx);
+        }
+        let mut out: Vec<SinkOutput> = Vec::new();
+        let mut t = ctx.start;
+        while t < ctx.end {
+            let end = (t + slice.max(1)).min(ctx.end);
+            for sink in self.evaluate(&EvalContext { start: t, end, ..*ctx }) {
+                merge_sink(&mut out, sink);
+            }
+            t = end;
+        }
+        out
+    }
+
+    /// Evaluates a preview window as playback would hear it. Without automation that is
+    /// one evaluation. With it, the window goes a slice at a time: notes come from every
+    /// slice, other values (scales, chords, rhythms) from the slice holding `focus`.
+    fn run_preview(&self, ctx: &EvalContext, focus: Ticks) -> Evaluation {
+        if !self.automated {
+            return self.run(ctx);
+        }
+        let mut merged: Option<Evaluation> = None;
+        let mut t = ctx.start;
+        while t < ctx.end {
+            let end = (t + PREVIEW_SLICE).min(ctx.end);
+            let e = self.run(&EvalContext { start: t, end, ..*ctx });
+            let in_slice = |n: &Note| n.start >= t && n.start < end;
+            let here = (t..end).contains(&focus);
+            let m = merged.get_or_insert_with(|| Evaluation {
+                outputs: e.outputs.iter().map(|o| vec![None; o.len()]).collect(),
+                sinks: Vec::new(),
+                issues: Vec::new(),
+                modules: Vec::new(),
+            });
+            for (outs, acc) in e.outputs.into_iter().zip(&mut m.outputs) {
+                for (v, slot) in outs.into_iter().zip(acc.iter_mut()) {
+                    match (v, slot) {
+                        (Some(Value::Notes(n)), Some(Value::Notes(have))) => {
+                            have.extend(n.into_iter().filter(in_slice));
+                        }
+                        (Some(Value::Notes(n)), slot) => {
+                            *slot = Some(Value::Notes(n.into_iter().filter(in_slice).collect()));
+                        }
+                        (Some(v), slot) if here || slot.is_none() => *slot = Some(v),
+                        _ => {}
+                    }
+                }
+            }
+            for mut sink in e.sinks {
+                sink.notes.retain(in_slice);
+                merge_sink(&mut m.sinks, sink);
+            }
+            for issue in e.issues {
+                if !m.issues.contains(&issue) {
+                    m.issues.push(issue);
+                }
+            }
+            t = end;
+        }
+        merged.unwrap_or_else(|| self.run(ctx))
+    }
+
     /// Like [`Graph::evaluate`], plus the settings of rack modules whose parameters are
     /// automated, as they are at the start of the window.
     pub fn evaluate_window(&self, ctx: &EvalContext) -> (Vec<SinkOutput>, Vec<(u64, ModuleKind)>) {
@@ -556,8 +697,15 @@ impl Graph {
         (sinks, eval.modules)
     }
 
-    /// The value on one of a node's outputs (the first when `port` is `None`).
-    pub fn output_value(&self, node: &str, port: Option<&str>, ctx: &EvalContext) -> Result<Value, String> {
+    /// The value on one of a node's outputs (the first when `port` is `None`), as the
+    /// previews show it (see [`Graph::report_window`]).
+    pub fn output_value(
+        &self,
+        node: &str,
+        port: Option<&str>,
+        ctx: &EvalContext,
+        focus: Ticks,
+    ) -> Result<Value, String> {
         let i = self
             .nodes
             .iter()
@@ -572,7 +720,7 @@ impl Graph {
             None if outputs.is_empty() => return Err("this node has no output".into()),
             None => 0,
         };
-        self.run(ctx).outputs[i][out]
+        self.run_preview(ctx, focus).outputs[i][out]
             .take()
             .ok_or_else(|| "no value yet: connect its inputs".into())
     }
@@ -580,20 +728,15 @@ impl Graph {
     /// Issues plus a short text preview of every node's output, evaluated over the
     /// first `bars` bars.
     pub fn report(&self, meter: Meter, bars: u32, sync: bool) -> CompileReport {
-        self.report_section(meter, bars, sync, 0, 0)
+        self.report_window(&EvalContext::preview(meter, bars, sync, 0, 0), 0)
     }
 
-    /// Like [`Graph::report`], as heard in a section (see [`EvalContext::section`]).
-    pub fn report_section(
-        &self,
-        meter: Meter,
-        bars: u32,
-        sync: bool,
-        section: u64,
-        repeat: u32,
-    ) -> CompileReport {
-        let ctx = EvalContext::preview(meter, bars, sync, section, repeat);
-        let eval = self.run(&ctx);
+    /// Issues, text previews and views of every node's output over the window of `ctx`
+    /// (its section, salt and span), with automation as heard at `focus` (see
+    /// [`Graph::run_preview`]). Views are drawn from the start of the window.
+    pub fn report_window(&self, ctx: &EvalContext, focus: Ticks) -> CompileReport {
+        let meter = ctx.meter;
+        let eval = self.run_preview(ctx, focus);
         let mut issues = self.issues.clone();
         issues.extend(eval.issues);
         let mut previews = Vec::new();
@@ -638,16 +781,34 @@ impl Graph {
             .filter_map(|(i, n)| {
                 let own = n.imp.as_ref().and_then(|imp| imp.view());
                 let view = own.or_else(|| {
-                    value_view(eval.outputs[i].iter().flatten().next()?, meter, ctx.end)
+                    let v = eval.outputs[i].iter().flatten().next()?;
+                    value_view(v, meter, ctx.start, ctx.end - ctx.start)
                 })?;
                 Some((n.id.clone(), view))
             })
+            .collect();
+        let context = self
+            .implicit
+            .iter()
+            .map(|&(i, k)| (self.nodes[i].id.clone(), self.nodes[i].spec.inputs[k].name.to_string()))
             .collect();
         CompileReport {
             issues,
             previews,
             views,
+            context,
         }
+    }
+}
+
+/// How finely previews follow automation: as finely as playback does by default.
+const PREVIEW_SLICE: Ticks = pm_theory::PPQ / 4;
+
+/// Adds a sink's notes to the list, joining them with an earlier sink of the same node.
+fn merge_sink(out: &mut Vec<SinkOutput>, sink: SinkOutput) {
+    match out.iter_mut().find(|o| o.node == sink.node) {
+        Some(o) => o.notes.extend(sink.notes),
+        None => out.push(sink),
     }
 }
 
@@ -715,8 +876,9 @@ pub(crate) fn describe(v: &Value, meter: Meter) -> String {
 const MAX_VIEW_SEGMENTS: usize = 64;
 
 /// A drawable preview of a value: a keyboard for scales and chords, a step grid for
-/// rhythms, a piano roll for notes. `None` where only text makes sense (other tunings).
-pub(crate) fn value_view(v: &Value, meter: Meter, window: Ticks) -> Option<Json> {
+/// rhythms, a piano roll for notes and a curve for controls. `None` where only text makes
+/// sense (other tunings). Notes and curves cover `window` ticks from `start`, drawn from 0.
+pub(crate) fn value_view(v: &Value, meter: Meter, start: Ticks, window: Ticks) -> Option<Json> {
     let bar = meter.ticks_per_bar();
     match v {
         Value::Scale(tl) => {
@@ -763,10 +925,10 @@ pub(crate) fn value_view(v: &Value, meter: Meter, window: Ticks) -> Option<Json>
             }
             let notes = notes
                 .iter()
-                .filter(|n| n.start < window)
+                .filter(|n| n.start >= start && n.start - start < window)
                 .map(|n| {
                     Json::obj(vec![
-                        ("t", Json::Num(n.start as f64)),
+                        ("t", Json::Num((n.start - start) as f64)),
                         ("d", Json::Num(n.duration as f64)),
                         ("p", Json::Num(n.pitch.step() as f64)),
                         ("v", Json::Num(n.voice as f64)),
@@ -789,7 +951,7 @@ pub(crate) fn value_view(v: &Value, meter: Meter, window: Ticks) -> Option<Json>
             let points: Vec<(f64, f64)> = (0..=n)
                 .map(|k| {
                     let t = window * k / n;
-                    (t as f64, c.at(t))
+                    (t as f64, c.at(start + t))
                 })
                 .collect();
             let (lo, hi) = points
@@ -850,17 +1012,20 @@ fn describe_notes(notes: &[Note], meter: Meter) -> String {
         return "no notes".into();
     }
     let bar = meter.ticks_per_bar();
+    let first = notes.iter().map(|n| n.start / bar + 1).min().unwrap_or(1);
+    let last = notes.iter().map(|n| n.start / bar + 1).max().unwrap_or(1);
+    // The window may start past bar 1 (the previews follow the playhead in blocks).
+    let block = (first - 1) / 4 * 4 + 1;
     let first_bar: Vec<String> = notes
         .iter()
-        .filter(|n| n.start < bar)
+        .filter(|n| n.start / bar + 1 == first)
         .take(16)
         .map(|n| n.pitch.to_string())
         .collect();
-    let last_bar = notes.iter().map(|n| n.start / bar + 1).max().unwrap_or(1);
-    let mut text = if last_bar > 1 {
-        format!("{} notes in bars 1–{last_bar}", notes.len())
+    let mut text = if last > block {
+        format!("{} notes in bars {block}–{last}", notes.len())
     } else {
-        format!("{} notes in bar 1", notes.len())
+        format!("{} notes in bar {block}", notes.len())
     };
     if !first_bar.is_empty() {
         let _ = write!(text, "\n{}", first_bar.join(" "));
@@ -1056,6 +1221,53 @@ mod tests {
     }
 
     #[test]
+    fn harmonic_context_feeds_unwired_inputs() {
+        let doc = GraphDoc {
+            nodes: vec![
+                node("p", "progression", &[("chords", text("I IV"))]),
+                node("ctx", "context", &[]),
+                node("root", "chord_root", &[]),
+                node("x", "chord", &[("symbol", text("Dm"))]),
+                node("pc", "play_chords", &[]),
+                node("sw", "switch_chord", &[]),
+                node("arp", "arp", &[]),
+            ],
+            wires: vec![
+                wire("p", "chords", "ctx", "chords"),
+                wire("p", "key", "ctx", "key"),
+                wire("x", "chord", "pc", "chords"),
+            ],
+            ..Default::default()
+        };
+        let g = Graph::compile(&doc);
+        assert!(g.issues().is_empty(), "{:?}", g.issues());
+        let r = g.report(Meter::COMMON, 2, true);
+        let fed: Vec<(&str, &str)> = r.context.iter().map(|(n, p)| (n.as_str(), p.as_str())).collect();
+        // Unwired chord and scale inputs read it; a wire wins; switches don't.
+        assert_eq!(fed, [("root", "chords"), ("arp", "scale")]);
+        let preview = |id: &str| r.previews.iter().find(|p| p.0 == id).map(|p| p.1.clone()).unwrap_or_default();
+        // One held root per chord (no rhythm wired): C, then F.
+        assert!(preview("root").starts_with("2 notes in bars 1–2\nC2"), "{}", preview("root"));
+        assert!(preview("pc").contains("D4"), "{}", preview("pc"));
+        assert!(preview("arp").contains("C4 D4 E4"), "the key, not the chord: {}", preview("arp"));
+
+        // A node that feeds the context doesn't read it (no loop), and a second context is ignored.
+        let doc = GraphDoc {
+            nodes: vec![
+                node("t", "transpose", &[]),
+                node("ctx", "context", &[]),
+                node("ctx2", "context", &[]),
+            ],
+            wires: vec![wire("t", "chords", "ctx", "chords")],
+            ..Default::default()
+        };
+        let g = Graph::compile(&doc);
+        assert!(g.report(Meter::COMMON, 1, true).context.is_empty());
+        let issues: Vec<_> = g.issues().iter().map(|i| (i.node.as_str(), i.message.as_str())).collect();
+        assert_eq!(issues, [("ctx2", "only one Harmonic context is used; this one is ignored")]);
+    }
+
+    #[test]
     fn controls_automate_parameters() {
         let bar = Meter::COMMON.ticks_per_bar();
         let doc = GraphDoc {
@@ -1075,7 +1287,7 @@ mod tests {
         // One step a bar: the chord moves up 5, then 7, then starts again.
         let lowest = |b: u32| {
             let ctx = EvalContext::new(b * bar, b * bar + PPQ / 4, Meter::COMMON, 0);
-            match g.output_value("t", None, &ctx).unwrap() {
+            match g.output_value("t", None, &ctx, ctx.start).unwrap() {
                 Value::Chord(tl) => tl.at(0).value.notes()[0].step(),
                 v => panic!("{v:?}"),
             }
@@ -1086,9 +1298,13 @@ mod tests {
         let mut bad = doc.clone();
         bad.wires.push(wire("k", "control", "t", "param.nope"));
         bad.wires.push(wire("k", "control", "t", "chords"));
+        bad.nodes.push(node("w", "random_walk", &[]));
+        bad.wires.push(wire("k", "control", "w", "param.seed"));
         let issues = Graph::compile(&bad).issues().to_vec();
         assert!(issues.iter().any(|i| i.message == "no port 'param.nope'"), "{issues:?}");
         assert!(issues.iter().any(|i| i.message == "a control can't feed a chord input"), "{issues:?}");
+        // Seeds pick a stream rather than an amount, so they aren't automated.
+        assert!(issues.iter().any(|i| i.node == "w" && i.message == "no port 'param.seed'"), "{issues:?}");
 
         // The control's own view is a curve over the preview window.
         let r = g.report(Meter::COMMON, 4, true);

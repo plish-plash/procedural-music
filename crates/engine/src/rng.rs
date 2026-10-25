@@ -15,6 +15,24 @@ pub fn hash(parts: &[u64]) -> u64 {
         .fold(0x51_7cc1_b727_220a_u64, |acc, &p| mix(acc ^ mix(p)))
 }
 
+/// Seeds run from 0 to 9999 (the range of a node's Seed parameter).
+pub const SEEDS: u64 = 10_000;
+
+/// The seed an unlocked node plays from in a pass with this salt. Locking a node with
+/// this as its seed keeps exactly what it was playing.
+pub fn fresh_seed(seed: u64, salt: u64) -> u64 {
+    hash(&[seed, salt]) % SEEDS
+}
+
+/// The seed a random node draws from: its own when locked, a fresh one each pass when not.
+pub fn stream(lock: bool, seed: u64, salt: u64) -> u64 {
+    if lock {
+        seed
+    } else {
+        fresh_seed(seed, salt)
+    }
+}
+
 /// A number in `0..n` (n > 0) from a hash.
 pub fn below(h: u64, n: u64) -> u64 {
     if n == 0 {

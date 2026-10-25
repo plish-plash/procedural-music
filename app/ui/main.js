@@ -82,6 +82,7 @@ function undoRedo(redo) {
   dirty = true;
   updateTitle();
   autosave();
+  syncRandom().catch(() => {});
   schedulePush();
   updateUndoButtons();
   setStatus(redo ? 'Redone' : 'Undone', true);
@@ -161,6 +162,7 @@ async function load(doc, path = null, isDirty = false) {
   timeline.setSectionEdit(false);
   timeline.setLoop(mode === 'perform' ? 'section' : 'song');
   await api.call('set_cursor', { tick: 0 });
+  await syncRandom();
   await pushGraph();
   resetHistory();
   autosave();
@@ -274,6 +276,48 @@ function showPlaying(isPlaying) {
 
 let polling = false;
 let solveGeneration = null;
+let previewKey = null;
+let lastSalt = null;
+
+// ---- Randomness ---------------------------------------------------------------
+// The project can lock randomness (every playback the same, from the project's seed) or
+// leave it fresh (something new on every Play). 🎲 rerolls either way.
+
+/** Tells the engine the project's random lock (after loading, undo or redo). */
+async function syncRandom() {
+  const r = editor.doc.random;
+  await api.call('set_random', r?.lock ? { lock: true, seed: r.seed } : { lock: false });
+}
+
+async function toggleProjectLock() {
+  const lock = !editor.doc.random?.lock;
+  // Locking keeps the current salt (what was just heard) as the project's seed.
+  const { seed } = await api.call('set_random', { lock });
+  if (lock) editor.doc.random = { lock: true, seed };
+  else delete editor.doc.random;
+  onChange({ graph: false });
+  setStatus(lock ? 'Randomness locked: every playback is now the same' : 'Randomness fresh: every Play is new', true);
+  await pollStatus();
+}
+
+async function rerollProject() {
+  const { seed } = await api.call('reroll');
+  if (editor.doc.random?.lock) {
+    editor.doc.random.seed = seed;
+    onChange({ graph: false });
+  }
+  setStatus(playing ? 'Rerolled: something new from the next pass' : 'Rerolled: the previews show what Play will play', true);
+  await pollStatus();
+}
+
+function showRandom(s) {
+  const b = $('btn-random-lock');
+  b.classList.toggle('on', !!s.randomLocked);
+  b.textContent = s.randomLocked ? '🔒 Locked' : '🔓 Fresh';
+  b.title = s.randomLocked
+    ? 'Randomness is locked: every playback is the same. Click to make each Play fresh.'
+    : 'Random nodes play something new on every Play. Click to lock the whole song as it is now.';
+}
 async function pollStatus() {
   if (polling) return;
   polling = true;
@@ -287,20 +331,22 @@ async function pollStatus() {
     $('section-name').textContent = sec ? sec.name : '';
     $('section-name').hidden = !sec;
     $('position').title = s.tempo !== s.bpm ? `Tempo now ${s.tempo} bpm` : '';
-    // Rolls show the section in focus; their playhead moves only while it plays.
-    const showHead = s.playing && (editor.focus == null || editor.focus === s.section);
-    editor.setPlayhead(showHead ? s.tick : null);
+    // Previews show what's playing, so their playheads move whenever something plays.
+    editor.setPlayhead(s.playing ? s.tick : null);
     timeline.setStatus(s);
     updateCueBar(s);
-    if (s.solveGeneration !== undefined && s.solveGeneration !== solveGeneration) {
-      // A background counterpoint solve finished: refresh the piano rolls.
-      const first = solveGeneration === null;
-      solveGeneration = s.solveGeneration;
-      if (!first) {
-        editor.setReport(await api.call('report'));
-        scheduleSong();
-      }
-    }
+    showRandom(s);
+    // New previews when they'd show something else: a background counterpoint solve
+    // finished, the playhead moved into another block, section or lap, or the salt changed.
+    const solved = s.solveGeneration !== solveGeneration;
+    const moved = s.previewKey !== previewKey;
+    const salted = s.salt !== lastSalt;
+    const first = previewKey === null;
+    solveGeneration = s.solveGeneration;
+    previewKey = s.previewKey;
+    lastSalt = s.salt;
+    if (!first && (solved || moved)) editor.setReport(await api.call('report'));
+    if (!first && (solved || salted)) scheduleSong();
     if (s.midiError) setStatus(s.midiError);
     const audio = $('audio-status');
     if (s.audioError) {
@@ -467,6 +513,7 @@ async function init() {
     onAudition: audition,
     onProbe: probe,
     onSelect: (flats) => timeline?.setHighlight(flats),
+    onCaptureSeed: (node) => api.call('capture_seed', { node }).then((r) => r.seed).catch(() => null),
   });
   inspector = new Inspector({ root: $('inspector'), editor, onLibrarySave: saveToLibrary });
   editor.inspector = inspector;
@@ -513,6 +560,8 @@ async function init() {
   $('btn-open').addEventListener('click', open);
   $('btn-save').addEventListener('click', (e) => save(e.shiftKey));
   $('btn-ports').addEventListener('click', refreshPorts);
+  $('btn-random-lock').addEventListener('click', toggleProjectLock);
+  $('btn-reroll').addEventListener('click', rerollProject);
   $('btn-undo').addEventListener('click', () => undoRedo(false));
   $('btn-redo').addEventListener('click', () => undoRedo(true));
   for (const b of document.querySelectorAll('#mode button')) b.addEventListener('click', () => setMode(b.dataset.mode));

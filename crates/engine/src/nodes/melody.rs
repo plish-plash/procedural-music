@@ -59,7 +59,8 @@ pub static ARP: NodeSpec = NodeSpec {
     title: "Arpeggiator",
     category: "Melody",
     help: "Plays the notes of a scale (or a chord's tones) one per rhythm hit. \
-           The pattern restarts whenever the scale or chord changes. With no rhythm, it plays sixteenths.",
+           The pattern restarts whenever the scale or chord changes. With no rhythm, it plays sixteenths. \
+           Lock and Seed apply to the Random pattern.",
     inputs: &[port("scale", PortType::Scale), optional("rhythm", PortType::Rhythm)],
     outputs: &[port("notes", PortType::Notes)],
     params: &[
@@ -72,6 +73,8 @@ pub static ARP: NodeSpec = NodeSpec {
         ParamSpec { name: "range", label: "Octaves", kind: ParamKind::Number { min: 1.0, max: 4.0, step: 1.0, default: 1.0 } },
         GATE,
         VELOCITY,
+        ParamSpec { name: "lock", label: "Lock", kind: ParamKind::Bool { default: false } },
+        ParamSpec { name: "seed", label: "Seed", kind: ParamKind::Number { min: 0.0, max: 9999.0, step: 1.0, default: 1.0 } },
     ],
 };
 
@@ -79,6 +82,8 @@ pub fn build_arp(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     let pattern = p.text("pattern");
     let octave = p.int("octave");
     let range = p.int("range").max(1) as usize;
+    let lock = p.flag("lock");
+    let seed = p.number("seed") as u64;
     let gate_pct = p.number("gate");
     let vel = p.number("velocity");
     node(move |ins, ctx| {
@@ -105,7 +110,10 @@ pub fn build_arp(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                         period - i
                     }
                 }
-                "Random" => rng::below(rng::hash(&[ctx.salt, t as u64]), total as u64) as usize,
+                "Random" => {
+                    let s = rng::stream(lock, seed, ctx.salt);
+                    rng::below(rng::hash(&[s, t as u64]), total as u64) as usize
+                }
                 _ => k % total,
             };
             out.push(Note {
@@ -189,7 +197,8 @@ pub static RANDOM_WALK: NodeSpec = NodeSpec {
     title: "Random walk",
     category: "Melody",
     help: "A melody that wanders through the scale by small random steps, restarting from the root every phrase. \
-           Fresh each time unless Lock is on; locked phrases repeat exactly (change Seed for another one).",
+           Fresh on every pass unless Lock is on. Locking keeps what it was just playing, and every playback \
+           is then the same (Reroll or change Seed for another melody).",
     inputs: &[port("scale", PortType::Scale), optional("rhythm", PortType::Rhythm)],
     outputs: &[port("notes", PortType::Notes)],
     params: &[
@@ -224,11 +233,7 @@ pub fn build_random_walk(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
             let n = scale.len() as i32;
             let (lo, hi) = (-(range * n) / 2, (range * n) / 2);
             let origin = t - t % phrase;
-            let phrase_seed = if lock {
-                rng::hash(&[seed])
-            } else {
-                rng::hash(&[seed, ctx.salt, (t / phrase) as u64])
-            };
+            let phrase_seed = rng::hash(&[rng::stream(lock, seed, ctx.salt), (t / phrase) as u64]);
             let k = onsets_between(rhythm, origin, t);
             let mut pos = 0i32;
             for i in 1..=k {
@@ -540,22 +545,41 @@ mod tests {
     }
 
     #[test]
+    fn random_arp_locks_like_the_walk() {
+        let bar = Meter::COMMON.ticks_per_bar();
+        let arp = |params: &[(&str, ParamValue)], salt| {
+            let mut all = vec![("pattern", ParamValue::Text("Random".into()))];
+            all.extend(params.iter().cloned());
+            names(&run("arp", &all, vec![c_major(), None], &ctx(0, bar, salt)))
+        };
+        assert_ne!(arp(&[], 1), arp(&[], 2), "fresh on each pass");
+        let locked = [("lock", ParamValue::Bool(true))];
+        assert_eq!(arp(&locked, 1), arp(&locked, 2), "the same when locked");
+        let captured = [
+            ("lock", ParamValue::Bool(true)),
+            ("seed", ParamValue::Number(rng::fresh_seed(1, 3) as f64)),
+        ];
+        assert_eq!(arp(&[], 3), arp(&captured, 50), "locking keeps what played");
+    }
+
+    #[test]
     fn random_walk_lock_repeats_and_unlocked_varies() {
         let phrase = Meter::COMMON.ticks_per_bar() * 2;
         let locked = [("lock", ParamValue::Bool(true))];
-        let a = run(
-            "random_walk",
-            &locked,
-            vec![c_major(), None],
-            &ctx(0, phrase, 1),
-        );
-        let b = run(
-            "random_walk",
-            &locked,
-            vec![c_major(), None],
-            &ctx(phrase, 2 * phrase, 2),
-        );
-        assert_eq!(names(&a), names(&b));
+        let walk = |params: &[(&str, ParamValue)], start, salt| {
+            names(&run("random_walk", params, vec![c_major(), None], &ctx(start, start + phrase, salt)))
+        };
+        // Locked: the same on every pass (whatever the salt), different from phrase to phrase.
+        assert_eq!(walk(&locked, 0, 1), walk(&locked, 0, 2));
+        assert_ne!(walk(&locked, 0, 1), walk(&locked, phrase, 1));
+        // Locking with the pass's fresh seed keeps exactly what was playing.
+        let captured = [
+            ("lock", ParamValue::Bool(true)),
+            ("seed", ParamValue::Number(rng::fresh_seed(1, 7) as f64)),
+        ];
+        for start in [0, phrase, 5 * phrase] {
+            assert_eq!(walk(&[], start, 7), walk(&captured, start, 99));
+        }
         let c = run(
             "random_walk",
             &[],

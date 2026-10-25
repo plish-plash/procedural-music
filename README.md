@@ -47,7 +47,19 @@ file faster than real time.
   problems, a live preview of its output and all its settings.
 - Previews draw scales and chords on a keyboard (a progression also gets a strip of its
   chords; hover one to see it), rhythms as a step grid, notes as a small piano roll and
-  controls as a curve. While playing, the current chord and step light up.
+  controls as a curve. They show what is playing: the 4 bars around the playhead, in the
+  section playing, with its random choices and automation. Stopped, they show where Play
+  will start, with what was last heard.
+- A **Harmonic context** node sets the song's key and chords: any scale or chord input
+  left unwired anywhere (inside groups too) reads them, shown as "(context)" on the port.
+  A wire always wins. The Song template feeds it from its Progression, so Bass and Pads
+  follow along without wires.
+- **Randomness**: random nodes (Random walk, Arpeggiator's Random pattern, Counterpoint's
+  Variety) play something new on every Play. 🔒 on the node (or in the inspector) locks
+  one, keeping what it's playing now, and it then plays the same every time; 🎲 rerolls
+  a locked node. In the toolbar, **🔓 Fresh / 🔒 Locked** does the same for the whole
+  song, and 🎲 there rerolls everything unlocked (or the song's seed, when locked).
+  Exports match what you heard.
 - **Pin** (●) the preview or a setting in the inspector to show it on the node too. Source
   nodes (Scale, Progression, Pattern, LFO…), Counterpoint and Piano roll show their
   preview by default.
@@ -128,8 +140,8 @@ line or progression.
   Hover a note to see which rules it bends and what the next-best note would have cost.
 - The rule groups (Parallels, Dissonance, Melody, …) can be switched off to hear what
   each one does.
-- *Variety* adds random preference so the solver picks among good answers; with *Lock*
-  on, the same seed gives the same line, and with it off you get a new line on each Play.
+- *Variety* adds random preference so the solver picks among good answers; locked (the
+  default), the same seed gives the same lines, and unlocked you get new lines on each Play.
 - While playing, a quick answer is used at once and a more thorough search finishes in
   the background (the roll shows *refining…* meanwhile). Exports always use the thorough
   answer.
@@ -164,8 +176,17 @@ handy for working on the editor.
   state (held notes, delay and reverb tails) survives edits to a node's settings.
 - **Built-in synths play any tuning exactly**, because they receive frequencies rather
   than MIDI note numbers.
-- **Randomness is fresh unless locked.** Random nodes mix in a value that changes every
-  time Play is pressed; turning on Lock makes their phrases repeat exactly.
+- **Randomness is fresh unless locked, and capturable.** Each Play draws a new *salt*
+  (mixed per section and lap). An unlocked node plays from `fresh_seed(seed, salt)`, a
+  locked one from its seed, both hashed with the phrase, so locking with the fresh seed
+  keeps exactly what was playing. A project lock fixes the salt. Previews, the timeline
+  overview and exports all use the engine's current salt, so they match playback.
+- **Previews evaluate what's playing.** The engine picks the 4-bar block under the
+  playhead (or the cursor when stopped); with automation it evaluates that block a
+  sixteenth at a time, as playback does. A `previewKey` in the status tells the editor
+  when to fetch new previews.
+- **The harmonic context is implicit wiring.** When the graph is compiled, unwired scale
+  and chord inputs of nodes that don't feed the context are connected to it.
 - **Counterpoint is a search, scored by rules.** Every rule adds a cost (strict rules a
   large one), and a beam search followed by local improvement looks for the cheapest set
   of lines. The cost breakdown is what the piano roll explains. Solutions are cached by

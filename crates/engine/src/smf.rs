@@ -80,11 +80,12 @@ pub fn part_name(engine: &Engine, node: &str) -> String {
     })
 }
 
-/// Encodes the whole arrangement (or `bars` bars without one) as a format-1 MIDI file.
-/// Built-in instruments get channels of their own (drums on channel 10); MIDI outputs
-/// keep their channel and program.
-pub fn export(engine: &Engine, bars: u32, salt: u64) -> Vec<u8> {
-    let parts: Vec<SinkOutput> = engine.song_notes(bars, true, salt);
+/// Encodes the whole arrangement (or `bars` bars without one) as a format-1 MIDI file,
+/// as the engine's current salt plays it (what the previews show). Built-in instruments
+/// get channels of their own (drums on channel 10); MIDI outputs keep their channel and
+/// program.
+pub fn export(engine: &Engine, bars: u32) -> Vec<u8> {
+    let parts: Vec<SinkOutput> = engine.song_notes(bars, true);
     let meter = engine.meter();
     let mut tracks = Vec::new();
 
@@ -183,7 +184,7 @@ mod tests {
         let mut e = Engine::new();
         e.set_graph(&doc);
         e.set_bpm(0.0, 100.0);
-        let bytes = export(&e, 8, 0);
+        let bytes = export(&e, 8);
         assert_eq!(&bytes[..4], b"MThd");
         assert_eq!(
             u16::from_be_bytes([bytes[10], bytes[11]]),

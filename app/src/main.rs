@@ -123,9 +123,10 @@ async fn open_project() -> Result<Option<(String, String)>, String> {
 /// than real time) and saves a WAV file. Returns the path, or None if cancelled.
 #[tauri::command]
 async fn export_wav(state: tauri::State<'_, Arc<Shared>>, bars: u32) -> Result<Option<String>, String> {
-    let (doc, bpm) = {
+    // The salt of what was heard, so unlocked random parts render as they played.
+    let (doc, bpm, salt) = {
         let engine = state.engine.lock().unwrap();
-        (engine.doc().clone(), engine.bpm())
+        (engine.doc().clone(), engine.bpm(), engine.salt())
     };
     let Some(path) = rfd::FileDialog::new()
         .set_title("Export WAV")
@@ -136,7 +137,7 @@ async fn export_wav(state: tauri::State<'_, Arc<Shared>>, bars: u32) -> Result<O
         return Ok(None);
     };
     const RATE: u32 = 48_000;
-    let audio = pm_engine::offline::render(&doc, bpm, bars.clamp(1, 512), 3.0, RATE, salt());
+    let audio = pm_engine::offline::render(&doc, bpm, bars.clamp(1, 512), 3.0, RATE, salt);
     std::fs::write(&path, pm_synth::wav::encode_stereo(&audio, RATE))
         .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
     Ok(Some(path.display().to_string()))
@@ -156,7 +157,7 @@ async fn export_midi(state: tauri::State<'_, Arc<Shared>>, bars: u32) -> Result<
     };
     let bytes = {
         let engine = state.engine.lock().unwrap();
-        pm_engine::smf::export(&engine, bars.clamp(1, 999), salt())
+        pm_engine::smf::export(&engine, bars.clamp(1, 999))
     };
     std::fs::write(&path, bytes).map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
     Ok(Some(path.display().to_string()))
@@ -216,7 +217,12 @@ fn library_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
 fn main() {
     let start = Instant::now();
     let shared = Arc::new(Shared {
-        engine: Mutex::new(Engine::new()),
+        engine: Mutex::new({
+            // A different salt each session, so unlocked random nodes start out fresh.
+            let mut engine = Engine::new();
+            engine.set_salt(salt());
+            engine
+        }),
         midi: Mutex::new(midi::Midi::default()),
         audio: audio::start(start),
         start,

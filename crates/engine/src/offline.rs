@@ -7,7 +7,8 @@ use crate::engine::{Engine, LoopMode};
 use crate::graph::GraphDoc;
 
 /// Renders the arrangement (or `bars` bars of a patch without one), plus `tail` seconds for releases and echoes, as
-/// interleaved stereo samples.
+/// interleaved stereo samples. `salt` picks what unlocked random nodes play: pass the live
+/// engine's salt to render what was heard.
 pub fn render(
     doc: &GraphDoc,
     bpm: f64,
@@ -25,6 +26,7 @@ pub fn render(
     // With an arrangement, the whole song once through (and `bars` is ignored).
     engine.set_loop(LoopMode::Off);
     let length = engine.duration(bars);
+    engine.set_salt(salt);
     engine.play(0.0, salt);
     // `play` starts the music 50 ms in; drop that lead-in from the output.
     let lead_in = 0.05;

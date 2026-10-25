@@ -96,6 +96,9 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 }
 .transport .play.playing { background: #3a2226; border-color: #6a3038; color: #ffd0d4; }
 .bpm input { width: 64px; margin-left: 4px; }
+.random-ctl { display: inline-flex; gap: 4px; }
+.random-lock { min-width: 92px; }
+.random-lock.on { background: #3a3220; border-color: #6b5a2c; color: #ffe2a8; }
 .position {
   font-family: var(--mono); font-size: 15px; min-width: 64px; text-align: center;
   background: #0d1015; border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px;
@@ -210,6 +213,20 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 /* Signal-layer ports are triangles. */
 .port[data-type=audio] .dot, .port[data-type=control] .dot { border: 0; border-radius: 0; background: var(--pt); clip-path: polygon(0 0, 100% 50%, 0 100%); width: 12px; height: 13px; }
 .port.in[data-type=audio]:not(.connected) .dot, .port.in[data-type=control]:not(.connected) .dot { opacity: 0.45; }
+/* Inputs fed by the harmonic context: a dashed, hollow dot. */
+.port.from-context .dot { border-style: dashed; background: var(--panel); }
+.port.from-context .label::after { content: " (context)"; color: var(--text-3); }
+
+/* Lock and reroll on random nodes. */
+.head-buttons.rand .mini { padding: 0 4px; font-size: 11px; line-height: 16px; background: rgba(0,0,0,0.18); border-color: transparent; }
+.head-buttons.rand .rand-lock.on { background: rgba(0,0,0,0.35); }
+.head-buttons.rand .mini[disabled] { opacity: 0.35; cursor: default; }
+.insp-random { display: grid; grid-template-columns: auto 1fr auto; gap: 6px; align-items: center; }
+.insp-random .param { grid-template-columns: 40px 1fr; }
+.rand-btn { padding: 2px 8px; }
+.rand-btn.rand-lock.on { background: #3a3220; border-color: #6b5a2c; color: #ffe2a8; }
+.rand-btn[disabled] { opacity: 0.4; cursor: default; }
+body.perform .head-buttons.rand .mini { font-size: 15px; padding: 2px 8px; }
 
 /* Pinned parameters: a control row with an automation input on the left edge. */
 .node-pins { padding: 2px 10px 6px; display: grid; gap: 4px; border-top: 1px solid var(--line); }

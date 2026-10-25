@@ -152,6 +152,32 @@ impl NodeImpl for Switch {
     }
 }
 
+// ---- Harmonic context -------------------------------------------------------------
+
+pub static CONTEXT: NodeSpec = NodeSpec {
+    kind: "context",
+    title: "Harmonic context",
+    category: "Structure",
+    help: "The song's key and chords. Every scale or chord input left unwired anywhere in the \
+           patch (inside groups too) reads them from here, so the parts follow one harmony \
+           without wires to each; a wire always wins. Without a key, scale inputs get the chords' \
+           own notes. Use one per patch.",
+    inputs: &[optional("key", PortType::Scale), optional("chords", PortType::Chord)],
+    outputs: &[port("key", PortType::Scale), port("chords", PortType::Chord)],
+    params: &[],
+};
+
+pub fn build_context(_: &Params) -> Result<Box<dyn NodeImpl>, String> {
+    super::theory::node(|ins, _| {
+        let chords = ins.chord(1).cloned().map(Value::Chord);
+        let key = match ins.scale(0) {
+            Some(k) => Some(Value::Scale(k.clone())),
+            None => chords.as_ref().and_then(|c| c.convert(PortType::Scale)),
+        };
+        Ok(vec![key, chords])
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

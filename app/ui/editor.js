@@ -73,6 +73,8 @@ export function normalizeDoc(doc) {
     version: 2,
     bpm: doc.bpm ?? 110,
     ...(doc.clockPort ? { clockPort: doc.clockPort } : {}),
+    // A project-wide random lock: every playback uses this seed.
+    ...(doc.random?.lock ? { random: { lock: true, seed: Number(doc.random.seed) || 0 } } : {}),
     nodes: normalizeNodes(doc.nodes),
     wires: normalizeWires(doc.wires),
     arrangement: {
@@ -95,8 +97,8 @@ function uniqueName(list, base) {
 }
 
 export class Editor {
-  constructor({ canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, specs, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect }) {
-    Object.assign(this, { canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect });
+  constructor({ canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, specs, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect, onCaptureSeed }) {
+    Object.assign(this, { canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect, onCaptureSeed });
     // The card shown while hovering a wire: what the wire carries.
     this.probe = { el: el('div', { class: 'probe', hidden: '' }), wire: null, timer: null, cache: new Map(), x: 0, y: 0 };
     document.body.append(this.probe.el);
@@ -330,6 +332,8 @@ export class Editor {
       n.graph = emptyGraph();
     } else {
       n.params = this.defaultParams(this.specs[type]);
+      // Each new random node gets a seed of its own, so two of them don't play alike.
+      if ('seed' in n.params) n.params.seed = randomSeed();
     }
     return this.insertNode(n);
   }
@@ -623,6 +627,62 @@ export class Editor {
     this.changed(graph);
   }
 
+  // ---- Randomness ------------------------------------------------------------------
+
+  /** Whether a node draws random numbers (it has Lock and Seed settings). */
+  isRandom(n, spec = this.specFor(n)) {
+    const names = (spec?.params ?? []).map((p) => p.name);
+    return n.type !== 'group' && names.includes('lock') && names.includes('seed');
+  }
+
+  /** A random node's Lock setting, as heard in the section in focus. */
+  isLocked(n) {
+    const spec = this.specFor(n).params.find((p) => p.name === 'lock');
+    return !!this.paramValue(n, this.flat(n.id), 'lock', spec.default).value;
+  }
+
+  /**
+   * Locks or unlocks a random node. Locking keeps what it's playing: the engine gives the
+   * seed that reproduces the current material (what the previews show).
+   */
+  async toggleLock(n) {
+    const flat = this.flat(n.id);
+    if (this.isLocked(n)) {
+      this.setParam(n, flat, 'lock', false);
+    } else {
+      const seed = await this.onCaptureSeed?.(flat);
+      if (seed != null) this.setParam(n, flat, 'seed', seed);
+      this.setParam(n, flat, 'lock', true);
+    }
+    this.rerenderNode(n.id);
+  }
+
+  /** A new seed for a locked random node: something else, which then stays. */
+  reroll(n) {
+    this.setParam(n, this.flat(n.id), 'seed', randomSeed());
+    this.rerenderNode(n.id);
+  }
+
+  /** The 🔒/🔓 and 🎲 buttons of a random node. */
+  randomButtons(n, cls = 'mini') {
+    const locked = this.isLocked(n);
+    return [
+      el('button', {
+        class: `${cls} rand-lock${locked ? ' on' : ''}`,
+        title: locked
+          ? 'Locked: plays the same every time. Click to make it fresh on every pass.'
+          : 'Fresh on every pass. Click to lock it, keeping what it is playing now.',
+        onclick: (e) => { e.stopPropagation(); this.toggleLock(n); },
+      }, locked ? '🔒' : '🔓'),
+      el('button', {
+        class: `${cls} rand-roll`,
+        disabled: locked ? null : '',
+        title: locked ? 'Reroll: a new seed, for something else that then stays' : 'Unlocked nodes already play something new on every pass; lock one to reroll it',
+        onclick: (e) => { e.stopPropagation(); this.reroll(n); },
+      }, '🎲'),
+    ];
+  }
+
   /** The wire automating one of a node's parameters, if any. */
   paramWire(id, name) {
     return this.g.wires.find((w) => w.to.node === id && w.to.port === PARAM_PORT + name) ?? null;
@@ -770,14 +830,20 @@ export class Editor {
     if (isGroup) classes.push('group-node');
     if (isIo) classes.push('io-node');
     if (this.selection.has(n.id)) classes.push('selected');
+    let right;
+    if (isGroup) {
+      right = el('span', { class: 'head-buttons' },
+        el('button', { class: 'mini', title: 'Open the group (or double-click its header)', onclick: () => this.enter(n.id) }, 'Open'),
+        el('button', { class: 'mini', title: 'More', onclick: (e) => this.groupMenu(n, e) }, '⋯'));
+    } else if (this.isRandom(n, spec)) {
+      right = el('span', { class: 'head-buttons rand' }, ...this.randomButtons(n));
+    } else {
+      right = el('span', { class: 'cat' }, spec.category);
+    }
     const head = el('div', { class: 'node-head', title: spec.help },
       el('span', { class: 'title' }, spec.title),
       el('span', { class: 'issue-mark' }, '!'),
-      isGroup
-        ? el('span', { class: 'head-buttons' },
-          el('button', { class: 'mini', title: 'Open the group (or double-click its header)', onclick: () => this.enter(n.id) }, 'Open'),
-          el('button', { class: 'mini', title: 'More', onclick: (e) => this.groupMenu(n, e) }, '⋯'))
-        : el('span', { class: 'cat' }, spec.category));
+      right);
     if (isGroup) {
       head.addEventListener('dblclick', (e) => {
         if (e.target.closest('button')) return;
@@ -1034,6 +1100,16 @@ export class Editor {
       if (mark) mark.title = mine.join('\n');
       const info = node.querySelector('.group-info');
       if (info) info.textContent = this.groupInfo(n);
+      // Unwired inputs that read the harmonic context.
+      const fed = new Set(report.context?.[this.flat(n.id)] ?? []);
+      for (const p of node.querySelectorAll('.port.in:not(.param-port)')) {
+        const on = fed.has(p.dataset.port);
+        if (on === p.classList.contains('from-context')) continue;
+        p.classList.toggle('from-context', on);
+        p.title = on
+          ? `${p.dataset.port} (${p.dataset.type}) · from the Harmonic context (wire something in to use that instead)`
+          : `${p.dataset.port} (${p.dataset.type})`;
+      }
       const view = node.querySelector('.node-view');
       if (view) this.fillView(view, n, { text: true });
     }
@@ -1667,6 +1743,11 @@ export class Editor {
       requestAnimationFrame(() => this.updateWires());
     }
   }
+}
+
+/** A seed for a random node (the range of its Seed parameter). */
+function randomSeed() {
+  return Math.floor(Math.random() * 10000);
 }
 
 function countNodes(graph) {

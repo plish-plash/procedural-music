@@ -349,13 +349,12 @@ impl CounterpointNode {
         } else {
             (0..self.bars).map(|b| (start + b * bar, bar)).collect()
         };
-        let salted = self.variety > 0 && !self.lock;
+        // Variety draws from the node's seed (fresh on each pass unless locked), per phrase.
         let seed = if self.variety == 0 {
             0
-        } else if salted {
-            crate::rng::hash(&[self.seed, ctx.salt, (start / length.max(1)) as u64])
         } else {
-            self.seed
+            let stream = crate::rng::stream(self.lock, self.seed, ctx.salt);
+            crate::rng::hash(&[stream, (start / length.max(1)) as u64])
         };
         let key = keys.first().map(|k| k.2).expect("at least one key segment");
         Ok((
@@ -539,7 +538,17 @@ pub static PIANO_ROLL: NodeSpec = NodeSpec {
 
 struct PianoRoll {
     bars: u32,
-    shown: Mutex<Option<(Vec<Note>, Ticks)>>,
+    /// The notes shown, the bar length, and where the shown bars start.
+    shown: Mutex<Option<(Vec<Note>, Ticks, Ticks)>>,
+}
+
+impl PianoRoll {
+    /// The bars shown for a window: the block of `bars` bars holding its start.
+    fn block(&self, ctx: &EvalContext) -> (Ticks, Ticks) {
+        let len = ctx.meter.ticks_per_bar() * self.bars;
+        let start = ctx.start - ctx.start % len;
+        (start, start + len)
+    }
 }
 
 pub fn build_piano_roll(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
@@ -555,23 +564,25 @@ impl NodeImpl for PianoRoll {
     }
 
     fn input_window(&self, ctx: &EvalContext) -> Option<(Ticks, Ticks)> {
-        Some((0, ctx.meter.ticks_per_bar() * self.bars))
+        Some(self.block(ctx))
     }
 
     fn eval(&self, ins: &Inputs, ctx: &EvalContext) -> Result<Vec<Option<Value>>, String> {
-        *self.shown.lock().unwrap() = Some((ins.notes(0).to_vec(), ctx.meter.ticks_per_bar()));
+        let (start, _) = self.block(ctx);
+        *self.shown.lock().unwrap() = Some((ins.notes(0).to_vec(), ctx.meter.ticks_per_bar(), start));
         Ok(Vec::new())
     }
 
     fn view(&self) -> Option<Json> {
         let guard = self.shown.lock().unwrap();
-        let (notes, bar) = guard.as_ref()?;
+        let (notes, bar, start) = guard.as_ref()?;
         let notes = notes
             .iter()
+            .filter(|n| n.start >= *start)
             .map(|n| {
                 let (key, _) = n.pitch.tuning().to_midi(n.pitch.step());
                 Json::obj(vec![
-                    ("t", Json::Num(n.start as f64)),
+                    ("t", Json::Num((n.start - start) as f64)),
                     ("d", Json::Num(n.duration as f64)),
                     ("p", Json::Num(key as f64)),
                     ("v", Json::Num(n.voice as f64)),

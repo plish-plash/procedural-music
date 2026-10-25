@@ -97,9 +97,22 @@ export class Inspector {
           this.pinButton(pinned, 'the preview', () => ed.togglePreviewPin(n))),
         this.viewEl, this.textEl));
     }
-    if (spec.params.length) {
+    if (ed.isRandom(n, spec)) {
+      // Lock, seed and reroll in one row (instead of the Lock and Seed settings).
+      const seed = spec.params.find((p) => p.name === 'seed');
+      const [lock, roll] = ed.randomButtons(n, 'rand-btn');
+      lock.textContent = ed.isLocked(n) ? '🔒 Locked' : '🔓 Fresh';
+      parts.push(el('section', {},
+        el('div', { class: 'insp-title' }, 'Randomness'),
+        el('div', { class: 'insp-random' }, lock, ed.renderParam(n, seed), roll),
+        el('p', { class: 'insp-hint' }, ed.isLocked(n)
+          ? 'Plays the same on every playback. 🎲 picks another seed.'
+          : 'Plays something new on every pass. Lock it to keep what it is playing now.')));
+    }
+    const settings = spec.params.filter((p) => !(ed.isRandom(n, spec) && (p.name === 'lock' || p.name === 'seed')));
+    if (settings.length) {
       const pinned = new Set(ed.pinnedParams(n, spec).map((p) => p.name));
-      const rows = spec.params.map((p) => {
+      const rows = settings.map((p) => {
         const wire = p.automatable ? ed.paramWire(n.id, p.name) : null;
         return el('div', { class: 'insp-param' },
           p.automatable

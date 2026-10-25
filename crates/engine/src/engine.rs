@@ -94,6 +94,17 @@ impl Ord for Pending {
     }
 }
 
+/// What the editor's previews evaluate (see [`Engine::preview_target`]).
+struct PreviewTarget {
+    /// Which of the song's graphs (its section's overrides).
+    graph: usize,
+    /// The preview window, section and salt.
+    ctx: EvalContext,
+    /// The section-local tick of interest (the playhead): automation is shown as it is here.
+    focus: Ticks,
+    bpm: f64,
+}
+
 /// One section of the compiled arrangement.
 #[derive(Clone, Debug)]
 pub struct Section {
@@ -281,7 +292,15 @@ pub struct Engine {
     /// don't cut each other off.
     active: HashMap<(String, u8, u8), u32>,
     clock_ports: Vec<String>,
+    /// What unlocked random nodes mix in: new for each Play (unless the project is
+    /// locked), kept after Stop so previews still show what was heard.
     salt: u64,
+    /// Whether `salt` has been played; the next Play then takes a fresh one.
+    salt_played: bool,
+    /// Project-wide lock: every playback uses the same salt (the project's seed).
+    random_locked: bool,
+    /// The caller's clock at the last poll or command (for previews of what's playing).
+    now: f64,
     /// The document the current graph was built from (for offline rendering).
     doc: GraphDoc,
     /// The section whose overrides the editor is showing (previews use it).
@@ -332,6 +351,9 @@ impl Engine {
             active: HashMap::new(),
             clock_ports: Vec::new(),
             salt: 0,
+            salt_played: false,
+            random_locked: false,
+            now: 0.0,
             doc: GraphDoc::default(),
             focus: None,
             audio: vec![AudioMsg::Tempo(110.0)],
@@ -427,40 +449,142 @@ impl Engine {
         }
     }
 
-    fn report_for(&self, song: &Song) -> CompileReport {
-        let (graph, key, repeat) = match self.focus.and_then(|f| song.sections.get(f)) {
-            Some(s) => (&song.graphs[s.graph], s.key, s.repeat),
-            None => (song.base(), 0, 0),
-        };
-        graph.report_section(self.meter, PREVIEW_BARS, self.synchronous, key, repeat)
+    /// The salt unlocked random nodes use in a section (`None`: no arrangement) on a lap
+    /// of the transport, so each section and each time round plays something new.
+    fn section_salt(&self, section: Option<usize>, lap: u64) -> u64 {
+        match section {
+            Some(i) => rng::hash(&[self.salt, i as u64, lap]),
+            None => self.salt,
+        }
     }
 
-    /// The value on one of a node's outputs as the editor shows it (over the preview
-    /// window, as heard in the section in focus), and the tempo there.
+    /// What the previews show: what's playing (the 4-bar block under the playhead, in
+    /// its section and lap), or when stopped, where Play will start, with the salt last
+    /// played (or rerolled since).
+    fn preview_target(&self, song: &Song) -> PreviewTarget {
+        let (tick, lap) = if self.playing {
+            let p = self.playhead(self.now) as Ticks;
+            self.transport.map(p).unwrap_or((self.song.length.saturating_sub(1), 0))
+        } else {
+            (self.cursor, 0)
+        };
+        let section = song.locate(tick);
+        let (graph, local, key, repeat) = match section {
+            Some(i) => {
+                let s = &song.sections[i];
+                (s.graph, tick - s.start, s.key, s.repeat)
+            }
+            None => (0, tick, 0, 0),
+        };
+        let window = self.meter.ticks_per_bar() * PREVIEW_BARS;
+        let start = local - local % window;
+        PreviewTarget {
+            graph,
+            focus: local,
+            bpm: self.section_bpm(section),
+            ctx: EvalContext {
+                preview: true,
+                sync: self.synchronous,
+                section: key,
+                repeat,
+                ..EvalContext::new(start, start + window, self.meter, self.section_salt(section, lap))
+            },
+        }
+    }
+
+    /// Identifies what the previews show: it changes when the playhead enters another
+    /// block, section or lap, the salt changes, or (with automation, which moves within a
+    /// block) on every beat.
+    pub fn preview_key(&self) -> u64 {
+        let song = self.pending_song.as_ref().unwrap_or(&self.song);
+        let t = self.preview_target(song);
+        let beat = if song.graphs[t.graph].is_automated() && self.playing {
+            t.focus / PPQ
+        } else {
+            0
+        };
+        rng::hash(&[t.graph as u64, t.ctx.section, t.ctx.repeat as u64, t.ctx.start as u64, t.ctx.salt, beat as u64])
+            & 0xffff_ffff
+    }
+
+    fn report_for(&self, song: &Song) -> CompileReport {
+        let t = self.preview_target(song);
+        song.graphs[t.graph].report_window(&t.ctx, t.focus)
+    }
+
+    /// The value on one of a node's outputs as the previews show it, and the tempo there.
     fn focused_value(&self, node: &str, port: Option<&str>) -> Result<(Value, f64), String> {
         let song = self.pending_song.as_ref().unwrap_or(&self.song);
-        let (graph, key, repeat, bpm) = match self.focus.and_then(|f| song.sections.get(f)) {
-            Some(s) => (&song.graphs[s.graph], s.key, s.repeat, s.bpm.unwrap_or(self.bpm)),
-            None => (song.base(), 0, 0, self.bpm),
-        };
-        let ctx = EvalContext::preview(self.meter, PREVIEW_BARS, self.synchronous, key, repeat);
-        Ok((graph.output_value(node, port, &ctx)?, bpm))
+        let t = self.preview_target(song);
+        Ok((song.graphs[t.graph].output_value(node, port, &t.ctx, t.focus)?, t.bpm))
     }
 
     /// What is on one of a node's outputs: a text description and, where one can be
     /// drawn, a view (as in the report). For hovering over a wire.
     pub fn probe(&self, node: &str, port: Option<&str>) -> Result<(String, Option<Json>), String> {
-        let (value, _) = self.focused_value(node, port)?;
-        let window = self.meter.ticks_per_bar() * PREVIEW_BARS;
+        let song = self.pending_song.as_ref().unwrap_or(&self.song);
+        let t = self.preview_target(song);
+        let value = song.graphs[t.graph].output_value(node, port, &t.ctx, t.focus)?;
         Ok((
             describe(&value, self.meter),
-            value_view(&value, self.meter, window),
+            value_view(&value, self.meter, t.ctx.start, t.ctx.end - t.ctx.start),
         ))
     }
 
-    /// Previews and views of the current graph (for refreshing after background work).
+    /// The seed that, with Lock on, makes a random node keep playing what the previews
+    /// show (what's playing, or what just played).
+    pub fn capture_seed(&self, node: &str) -> Result<u64, String> {
+        let song = self.pending_song.as_ref().unwrap_or(&self.song);
+        let t = self.preview_target(song);
+        let seed = song.graphs[t.graph]
+            .param_number(node, "seed")
+            .ok_or_else(|| format!("'{node}' has no seed"))?;
+        Ok(rng::fresh_seed(seed.max(0.0) as u64, t.ctx.salt))
+    }
+
+    /// Previews and views of the current graph.
     pub fn report(&self) -> CompileReport {
         self.report_for(self.pending_song.as_ref().unwrap_or(&self.song))
+    }
+
+    /// Notes the caller's clock, so previews know where the playhead is.
+    pub fn set_now(&mut self, now: f64) {
+        self.now = now;
+    }
+
+    // ---- Randomness ------------------------------------------------------------------
+
+    /// The salt of the current (or last, or next) playback.
+    pub fn salt(&self) -> u64 {
+        self.salt
+    }
+
+    pub fn random_locked(&self) -> bool {
+        self.random_locked
+    }
+
+    /// Sets the salt the next Play uses (and previews show).
+    pub fn set_salt(&mut self, salt: u64) {
+        self.salt = salt & 0xffff_ffff;
+        self.salt_played = false;
+    }
+
+    /// Locks or unlocks randomness for the whole project. Locked, every playback uses the
+    /// project's seed as its salt: `seed`, or without one, the current salt (keeping what
+    /// was just heard). Returns the seed in use.
+    pub fn set_random(&mut self, locked: bool, seed: Option<u64>) -> u64 {
+        self.random_locked = locked;
+        if let Some(seed) = seed {
+            self.set_salt(seed);
+        }
+        self.salt
+    }
+
+    /// Something new: a new project seed when locked, a new salt (for the next Play and
+    /// the previews) when not. Returns the salt now in use.
+    pub fn reroll(&mut self, fresh: u64) -> u64 {
+        self.set_salt(fresh);
+        self.salt
     }
 
     /// Shows previews as heard in a section (`None`: without overrides).
@@ -675,9 +799,10 @@ impl Engine {
         }
     }
 
-    /// Starts from the cursor. `salt` should differ every time so unlocked random nodes
-    /// play something new.
-    pub fn play(&mut self, now: f64, salt: u64) {
+    /// Starts from the cursor. `fresh` should differ every time: unlocked random nodes
+    /// play something new on each Play, unless the project is locked, or the current salt
+    /// hasn't been played yet (it was rerolled, and the previews already show it).
+    pub fn play(&mut self, now: f64, fresh: u64) {
         if self.playing {
             return;
         }
@@ -685,7 +810,11 @@ impl Engine {
             self.install(song);
         }
         self.playing = true;
-        self.salt = salt;
+        self.now = now;
+        if self.salt_played && !self.random_locked {
+            self.salt = fresh & 0xffff_ffff;
+        }
+        self.salt_played = true;
         self.scheduled_until = 0;
         self.end_at = None;
         self.cue = None;
@@ -774,6 +903,7 @@ impl Engine {
 
     /// Schedules ahead of the playhead and returns the messages due at `now`.
     pub fn poll(&mut self, now: f64) -> Vec<MidiMessage> {
+        self.now = now;
         if self.playing {
             let playhead = self.playhead(now);
             if self.end_at.is_some_and(|e| playhead >= e as f64) {
@@ -837,20 +967,14 @@ impl Engine {
             self.end_at = Some(p);
             return;
         };
-        let (graph, local, key, repeat, bpm, salt) = match self.song.locate(s) {
+        let section = self.song.locate(s);
+        let salt = self.section_salt(section, lap);
+        let (graph, local, key, repeat, bpm) = match section {
             Some(i) => {
                 let sec = &self.song.sections[i];
-                let salt = rng::hash(&[self.salt, i as u64, lap]);
-                (
-                    sec.graph,
-                    s - sec.start,
-                    sec.key,
-                    sec.repeat,
-                    sec.bpm.unwrap_or(self.bpm),
-                    salt,
-                )
+                (sec.graph, s - sec.start, sec.key, sec.repeat, sec.bpm.unwrap_or(self.bpm))
             }
-            None => (0, s, 0, 0, self.bpm, self.salt),
+            None => (0, s, 0, 0, self.bpm),
         };
         // Tempo and sound changes at section boundaries.
         let current = self.tempo_at_tick(p as f64).map_or(self.bpm, |t| t.bpm);
@@ -985,24 +1109,21 @@ impl Engine {
     }
 
     /// Every note of the arrangement (or of `bars` bars without one), in song ticks,
-    /// grouped by output node. With `sync`, slow nodes finish their best answer first.
-    pub fn song_notes(&self, bars: u32, sync: bool, salt: u64) -> Vec<SinkOutput> {
+    /// grouped by output node, as the current salt plays it (the first time through).
+    /// With `sync` (for exports), slow nodes finish their best answer first and automation
+    /// moves as finely as in playback; without it (the overview), once a beat.
+    pub fn song_notes(&self, bars: u32, sync: bool) -> Vec<SinkOutput> {
         let song = self.pending_song.as_ref().unwrap_or(&self.song);
         let mut spans: Vec<(usize, Ticks, Ticks, u64, u32, u64)> = Vec::new();
         if song.sections.is_empty() {
-            spans.push((0, 0, bars.max(1) * self.meter.ticks_per_bar(), 0, 0, salt));
+            let length = bars.max(1) * self.meter.ticks_per_bar();
+            spans.push((0, 0, length, 0, 0, self.section_salt(None, 0)));
         } else {
             for (i, s) in song.sections.iter().enumerate() {
-                spans.push((
-                    s.graph,
-                    s.start,
-                    s.length,
-                    s.key,
-                    s.repeat,
-                    rng::hash(&[salt, i as u64, 0]),
-                ));
+                spans.push((s.graph, s.start, s.length, s.key, s.repeat, self.section_salt(Some(i), 0)));
             }
         }
+        let slice = if sync { self.slice } else { PPQ };
         let mut out: Vec<SinkOutput> = Vec::new();
         for (graph, start, length, key, repeat, salt) in spans {
             let ctx = EvalContext {
@@ -1011,7 +1132,7 @@ impl Engine {
                 repeat,
                 ..EvalContext::new(0, length, self.meter, salt)
             };
-            for mut sink in song.graphs[graph].evaluate(&ctx) {
+            for mut sink in song.graphs[graph].evaluate_sliced(&ctx, slice) {
                 for n in &mut sink.notes {
                     n.start += start;
                 }
@@ -1498,10 +1619,98 @@ mod tests {
     fn song_notes_cover_the_arrangement() {
         let mut e = Engine::new();
         e.set_graph(&arranged());
-        let notes = e.song_notes(4, true, 0);
+        let notes = e.song_notes(4, true);
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].notes.len(), 4 + 8);
         assert_eq!(notes[0].notes[4].start, 3840);
         assert_eq!(notes[0].notes[5].start, 3840 + 480);
+    }
+
+    #[test]
+    fn salts_are_fresh_per_play_unless_locked_or_unplayed() {
+        let mut e = Engine::new();
+        e.set_graph(&doc("drum", &[]));
+        e.set_salt(5);
+        // A salt that hasn't been played yet (what the previews show) is what Play uses.
+        e.play(0.0, 100);
+        assert_eq!(e.salt(), 5);
+        e.stop();
+        assert_eq!(e.salt(), 5, "stopping keeps what was heard");
+        e.play(1.0, 200);
+        assert_eq!(e.salt(), 200, "then each Play is fresh");
+        e.stop();
+        // Locking the project keeps the current salt for every playback.
+        assert_eq!(e.set_random(true, None), 200);
+        e.play(2.0, 300);
+        assert_eq!(e.salt(), 200);
+        e.stop();
+        // Rerolling picks a new one, locked or not.
+        assert_eq!(e.reroll(400), 400);
+        e.play(3.0, 500);
+        assert_eq!(e.salt(), 400);
+        e.stop();
+        e.set_random(false, None);
+        e.play(4.0, 600);
+        assert_eq!(e.salt(), 600);
+    }
+
+    fn walk_doc(walk: &[(&str, ParamValue)]) -> GraphDoc {
+        let n = |id: &str, kind: &str, params: &[(&str, ParamValue)]| NodeDoc {
+            id: id.into(),
+            kind: kind.into(),
+            params: params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        };
+        GraphDoc {
+            nodes: vec![n("s", "scale", &[]), n("w", "random_walk", walk)],
+            wires: vec![WireDoc {
+                from_node: "s".into(),
+                from_port: "scale".into(),
+                to_node: "w".into(),
+                to_port: "scale".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn previews_follow_the_salt_and_locking_keeps_them() {
+        let preview = |e: &Engine| {
+            let r = e.report();
+            r.previews.iter().find(|p| p.0 == "w").unwrap().1.clone()
+        };
+        let mut e = Engine::new();
+        e.set_graph(&walk_doc(&[]));
+        e.set_salt(9);
+        let heard = preview(&e);
+        e.set_salt(10);
+        assert_ne!(preview(&e), heard, "a new salt, new previews");
+        e.set_salt(9);
+        assert_eq!(preview(&e), heard);
+        // Lock it with the captured seed: the same melody whatever the salt.
+        let seed = e.capture_seed("w").unwrap();
+        e.set_graph(&walk_doc(&[
+            ("lock", ParamValue::Bool(true)),
+            ("seed", ParamValue::Number(seed as f64)),
+        ]));
+        assert_eq!(preview(&e), heard);
+        e.set_salt(11);
+        assert_eq!(preview(&e), heard);
+    }
+
+    #[test]
+    fn previews_follow_the_playhead() {
+        let mut e = Engine::new();
+        e.set_bpm(0.0, 120.0);
+        e.set_graph(&walk_doc(&[]));
+        let first = e.preview_key();
+        e.play(0.0, 1);
+        run(&mut e, 0.5);
+        let playing = e.preview_key();
+        assert_eq!(playing, first, "the previews already showed what Play plays");
+        // 4 bars at 120 bpm is 8 s: the previews move on to the next block.
+        run(&mut e, 8.2);
+        assert_ne!(e.preview_key(), playing);
+        let text = e.report().previews.into_iter().find(|p| p.0 == "w").unwrap().1;
+        assert!(text.contains("bars 5–8"), "{text}");
     }
 }

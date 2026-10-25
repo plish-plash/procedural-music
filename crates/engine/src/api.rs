@@ -33,6 +33,7 @@ pub fn handle(
     command: &str,
     args: &Json,
 ) -> Result<Reply, String> {
+    engine.set_now(now);
     match command {
         "specs" => Ok(Reply::json(specs_json())),
         "set_graph" => {
@@ -129,6 +130,21 @@ pub fn handle(
             let seconds = engine.audition(now, node, port)?;
             Ok(Reply::json(Json::obj(vec![("seconds", Json::Num(seconds))])))
         }
+        "set_random" => {
+            let lock = args.get("lock") == Some(&Json::Bool(true));
+            let seed = args.get("seed").and_then(Json::as_f64).map(|s| s.max(0.0) as u64);
+            let seed = engine.set_random(lock, seed);
+            Ok(Reply::json(Json::obj(vec![("seed", Json::Num(seed as f64))])))
+        }
+        "reroll" => {
+            let seed = engine.reroll(salt);
+            Ok(Reply::json(Json::obj(vec![("seed", Json::Num(seed as f64))])))
+        }
+        "capture_seed" => {
+            let node = args.get("node").and_then(Json::as_str).ok_or("missing node")?;
+            let seed = engine.capture_seed(node)?;
+            Ok(Reply::json(Json::obj(vec![("seed", Json::Num(seed as f64))])))
+        }
         "probe" => {
             let node = args.get("node").and_then(Json::as_str).ok_or("missing node")?;
             let port = args.get("port").and_then(Json::as_str);
@@ -173,6 +189,9 @@ pub fn status_json(engine: &Engine, now: f64) -> Json {
             "solveGeneration",
             Json::Num(crate::solve_generation() as f64),
         ),
+        ("salt", Json::Num(engine.salt() as f64)),
+        ("randomLocked", Json::Bool(engine.random_locked())),
+        ("previewKey", Json::Num(engine.preview_key() as f64)),
         ("bar", Json::Num(bar as f64 + 1.0)),
         ("beat", Json::Num(beat as f64 + 1.0)),
         (
@@ -305,7 +324,7 @@ pub fn parse_graph(doc: &Json) -> Result<GraphDoc, String> {
 /// Every note of the song by part, for the arrangement overview: `{length, bar, parts:
 /// [{node, name, notes: [[start, duration, key, velocity, voice, spelled name], ...]}]}`.
 pub fn song_json(engine: &Engine, bars: u32) -> Json {
-    let parts = engine.song_notes(bars, false, 0);
+    let parts = engine.song_notes(bars, false);
     let bar = engine.meter().ticks_per_bar();
     let length = if engine.song_length() > 0 {
         engine.song_length()
@@ -375,6 +394,17 @@ pub fn report_json(report: &CompileReport) -> Json {
             ),
         ),
         ("views", Json::Obj(report.views.clone())),
+        ("context", {
+            // node -> [input ports the harmonic context feeds]
+            let mut by_node: Vec<(String, Json)> = Vec::new();
+            for (node, port) in &report.context {
+                match by_node.iter_mut().find(|(n, _)| n == node) {
+                    Some((_, Json::Arr(ports))) => ports.push(Json::str(port.as_str())),
+                    _ => by_node.push((node.clone(), Json::Arr(vec![Json::str(port.as_str())]))),
+                }
+            }
+            Json::Obj(by_node)
+        }),
     ])
 }
 

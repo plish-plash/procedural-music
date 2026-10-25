@@ -48,10 +48,9 @@ export function drumsPart(id, x, y, { kick = 'X...x...X..x.x..', snare = '....X.
   });
 }
 
-/** Chord roots on a Euclidean rhythm into the mono synth. */
+/** Chord roots on a Euclidean rhythm into the mono synth (chords from the harmonic context). */
 export function bassPart(id, x, y) {
   return group(id, 'Bass', x, y, {
-    inputs: [['chords', 'chord']],
     outputs: [['audio', 'audio']],
     exposed: ['r.hits', 'syn.cutoff'],
     labels: { 'r.hits': 'Notes per bar' },
@@ -61,16 +60,15 @@ export function bassPart(id, x, y) {
       { id: 'syn', type: 'mono_synth', x: 620, y: 0, params: { ...BASS } },
     ],
     wires: [
-      wire('@in', 'chords', 'root', 'chords'), wire('r', 'rhythm', 'root', 'rhythm'),
+      wire('r', 'rhythm', 'root', 'rhythm'),
       wire('root', 'notes', 'syn', 'notes'), wire('syn', 'audio', '@out', 'audio'),
     ],
   });
 }
 
-/** Four-note voicings, voice-led, held as pads. */
+/** Four-note voicings, voice-led, held as pads (chords from the harmonic context). */
 export function padsPart(id, x, y) {
   return group(id, 'Pads', x, y, {
-    inputs: [['chords', 'chord']],
     outputs: [['audio', 'audio']],
     exposed: ['syn.cutoff', 'fx.mix'],
     labels: { 'fx.mix': 'Chorus %' },
@@ -82,13 +80,14 @@ export function padsPart(id, x, y) {
       { id: 'fx', type: 'fx_chorus', x: 1300, y: 0, params: { rate: 0.5, depth: 50, mix: 40 } },
     ],
     wires: [
-      wire('@in', 'chords', 'v', 'chords'), wire('v', 'chords', 'vl', 'chords'), wire('vl', 'chords', 'pc', 'chords'),
+      wire('v', 'chords', 'vl', 'chords'), wire('vl', 'chords', 'pc', 'chords'),
       wire('pc', 'notes', 'syn', 'notes'), wire('syn', 'audio', 'fx', 'audio'), wire('fx', 'audio', '@out', 'audio'),
     ],
   });
 }
 
-/** An arpeggio over the chords, playing only in the sections listed in its switch. */
+/** An arpeggio over the chords, playing only in the sections listed in its switch. Its
+ * chords are wired in: from the context, a scale input would get the key, not the chord. */
 export function leadPart(id, x, y, sections = 'A, B') {
   return group(id, 'Lead', x, y, {
     inputs: [['chords', 'chord']],
@@ -109,11 +108,13 @@ export function leadPart(id, x, y, sections = 'A, B') {
   });
 }
 
-/** Progression → four parts → mixer → reverb → out, positioned for the canvas. */
+/** Progression → harmonic context (which the bass and pads follow) and the lead → mixer →
+ * reverb → out, positioned for the canvas. */
 export function songGraph({ chords, key, leadSections = 'A, B' }) {
   return {
     nodes: [
       { id: 'prog', type: 'progression', x: 40, y: 360, params: { chords, notation: 'Roman numerals', key, bars: 1, octave: 4 } },
+      { id: 'ctx', type: 'context', x: 40, y: 620, params: {} },
       drumsPart('drums', 420, 0),
       bassPart('bass', 420, 300),
       padsPart('pads', 420, 510),
@@ -123,7 +124,7 @@ export function songGraph({ chords, key, leadSections = 'A, B' }) {
       { id: 'out', type: 'audio_out', x: 1470, y: 280, params: { level: 0 } },
     ],
     wires: [
-      wire('prog', 'chords', 'bass', 'chords'), wire('prog', 'chords', 'pads', 'chords'), wire('prog', 'chords', 'lead', 'chords'),
+      wire('prog', 'chords', 'ctx', 'chords'), wire('prog', 'key', 'ctx', 'key'), wire('prog', 'chords', 'lead', 'chords'),
       wire('pads', 'audio', 'mix', 'a'), wire('bass', 'audio', 'mix', 'b'), wire('lead', 'audio', 'mix', 'c'), wire('drums', 'audio', 'mix', 'd'),
       wire('mix', 'audio', 'verb', 'audio'), wire('verb', 'audio', 'out', 'audio'),
     ],

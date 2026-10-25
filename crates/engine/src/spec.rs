@@ -119,11 +119,13 @@ pub struct ParamSpec {
 }
 
 impl ParamSpec {
-    /// Whether a Control input can drive this parameter of `node`: numbers, except on
-    /// nodes that keep state between evaluations (the counterpoint solver, piano rolls)
-    /// and MIDI outputs, whose channel and program aren't meant to move.
+    /// Whether a Control input can drive this parameter of `node`: numbers, except seeds
+    /// (which pick a stream, not an amount), on nodes that keep state between evaluations
+    /// (the counterpoint solver, piano rolls) and on MIDI outputs, whose channel and
+    /// program aren't meant to move.
     pub fn automatable(&self, node: &NodeSpec) -> bool {
         matches!(self.kind, ParamKind::Number { .. } | ParamKind::LogNumber { .. })
+            && self.name != "seed"
             && !matches!(node.kind, "counterpoint" | "piano_roll" | "midi_out")
     }
 

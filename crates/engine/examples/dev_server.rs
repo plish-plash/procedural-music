@@ -32,8 +32,15 @@ fn main() {
         root.join("index.html").exists(),
         "run from the workspace root (app/ui/index.html not found)"
     );
+    let mut engine = Engine::new();
+    engine.set_salt(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(1),
+    );
     let state = Arc::new(State {
-        engine: Mutex::new(Engine::new()),
+        engine: Mutex::new(engine),
         start: Instant::now(),
         notes_sent: AtomicU64::new(0),
         root,
@@ -109,7 +116,7 @@ fn serve(mut stream: TcpStream, state: &State) -> std::io::Result<()> {
                 let bars = args.get("bars").and_then(Json::as_f64).unwrap_or(8.0) as u32;
                 let bytes = {
                     let engine = state.engine.lock().unwrap();
-                    pm_engine::smf::export(&engine, bars, 1)
+                    pm_engine::smf::export(&engine, bars)
                 };
                 std::fs::write("export.mid", bytes)
                     .map(|_| Json::str("export.mid"))
@@ -117,11 +124,11 @@ fn serve(mut stream: TcpStream, state: &State) -> std::io::Result<()> {
             }
             "export_wav" => {
                 let bars = args.get("bars").and_then(Json::as_f64).unwrap_or(8.0) as u32;
-                let (doc, bpm) = {
+                let (doc, bpm, salt) = {
                     let engine = state.engine.lock().unwrap();
-                    (engine.doc().clone(), engine.bpm())
+                    (engine.doc().clone(), engine.bpm(), engine.salt())
                 };
-                let audio = pm_engine::offline::render(&doc, bpm, bars, 2.0, 48_000, 1);
+                let audio = pm_engine::offline::render(&doc, bpm, bars, 2.0, 48_000, salt);
                 std::fs::write("export.wav", pm_synth::wav::encode_stereo(&audio, 48_000))
                     .map(|_| Json::str("export.wav"))
                     .map_err(|e| e.to_string())

@@ -27,10 +27,12 @@ fn main() {
         eprintln!("issue: {}: {}", issue.node, issue.message);
     }
     engine.set_bpm(0.0, bpm);
+    // A fixed salt, so the same patch always renders the same.
+    engine.set_salt(7);
 
     let t = std::time::Instant::now();
     if out.ends_with(".mid") {
-        let bytes = smf::export(&engine, bars, 7);
+        let bytes = smf::export(&engine, bars);
         std::fs::write(out, &bytes).expect("write midi");
         println!(
             "{} bytes of MIDI in {:.2} s",
