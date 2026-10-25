@@ -3,13 +3,11 @@
 //! Both the desktop app and the development server route UI calls through
 //! [`handle`], so the protocol lives in one place.
 
-use std::collections::HashMap;
-
-use crate::engine::{Engine, MidiMessage};
-use crate::graph::{CompileReport, GraphDoc, NodeDoc, WireDoc};
+use crate::engine::{Engine, LoopMode, MidiMessage};
+use crate::graph::{CompileReport, GraphDoc};
 use crate::json::Json;
 use crate::nodes::specs;
-use crate::spec::{ParamKind, ParamValue, PortSpec, PortType};
+use crate::spec::{ParamKind, PortSpec, PortType};
 
 /// Result of one command: the JSON reply and any MIDI to send right away.
 pub struct Reply {
@@ -43,12 +41,62 @@ pub fn handle(
                 Json::Str(text) => Json::parse(text)?,
                 other => other.clone(),
             };
+            if let Some(focus) = args.get("focus") {
+                engine.set_focus(focus.as_f64().map(|f| f as usize));
+            }
+            if let Some(q) = args.get("quantize") {
+                engine.quantize_edits = q == &Json::Bool(true);
+            }
             let report = engine.set_graph(&parse_graph(&doc)?);
             Ok(Reply::json(report_json(&report)))
         }
+        "set_focus" => {
+            engine.set_focus(args.get("focus").and_then(Json::as_f64).map(|f| f as usize));
+            Ok(Reply::json(report_json(&engine.report())))
+        }
         "play" => {
+            if let Some(from) = args.get("from").and_then(Json::as_f64) {
+                engine.set_cursor(from.max(0.0) as u32);
+            }
             engine.play(now, salt);
             Ok(Reply::json(status_json(engine, now)))
+        }
+        "set_cursor" => {
+            let tick = args
+                .get("tick")
+                .and_then(Json::as_f64)
+                .ok_or("missing tick")?;
+            engine.set_cursor(tick.max(0.0) as u32);
+            Ok(Reply::json(status_json(engine, now)))
+        }
+        "set_loop" => {
+            let mode = match args.get("mode").and_then(Json::as_str).unwrap_or("song") {
+                "off" => LoopMode::Off,
+                "section" => LoopMode::Section(
+                    args.get("section")
+                        .and_then(Json::as_f64)
+                        .ok_or("missing section")? as usize,
+                ),
+                _ => LoopMode::Song,
+            };
+            engine.set_loop(mode);
+            Ok(Reply::json(status_json(engine, now)))
+        }
+        "cue" => {
+            let section = args
+                .get("section")
+                .and_then(Json::as_f64)
+                .ok_or("missing section")?;
+            engine.cue(section as usize);
+            Ok(Reply::json(status_json(engine, now)))
+        }
+        "song" => {
+            let bars = args
+                .get("bars")
+                .and_then(Json::as_f64)
+                .unwrap_or(8.0)
+                .clamp(1.0, 999.0) as u32;
+            Ok(Reply::json(song_json(engine, bars)))
         }
         "stop" => {
             let midi = engine.stop();
@@ -82,17 +130,34 @@ pub fn handle(
 }
 
 pub fn status_json(engine: &Engine, now: f64) -> Json {
-    let tick = engine.playhead(now);
+    let pos = engine.position(now);
     let meter = engine.meter();
-    let (bar, beat, _) = meter.position(tick as u32);
+    let (bar, beat, _) = meter.position(pos.song);
+    let loop_mode = match engine.loop_mode() {
+        LoopMode::Off => Json::str("off"),
+        LoopMode::Song => Json::str("song"),
+        LoopMode::Section(i) => Json::Num(i as f64),
+    };
     Json::obj(vec![
         ("playing", Json::Bool(engine.is_playing())),
         ("bpm", Json::Num(engine.bpm())),
+        ("tempo", Json::Num((pos.bpm * 10.0).round() / 10.0)),
+        ("tick", Json::Num(pos.local as f64)),
+        ("songTick", Json::Num(pos.song as f64)),
+        ("songLength", Json::Num(engine.song_length() as f64)),
+        (
+            "section",
+            pos.section.map_or(Json::Null, |i| Json::Num(i as f64)),
+        ),
+        ("loop", loop_mode),
+        (
+            "cued",
+            engine.cued().map_or(Json::Null, |i| Json::Num(i as f64)),
+        ),
         (
             "solveGeneration",
             Json::Num(crate::solve_generation() as f64),
         ),
-        ("tick", Json::Num(tick.floor())),
         ("bar", Json::Num(bar as f64 + 1.0)),
         ("beat", Json::Num(beat as f64 + 1.0)),
         (
@@ -214,54 +279,52 @@ pub fn specs_json() -> Json {
     ])
 }
 
-/// Reads a graph document: `{nodes: [{id, type, params}], wires: [{from: {node, port}, to: {node, port}}]}`.
-/// Other fields (positions, notes) are ignored.
+/// Reads a project document (see [`crate::project::parse_project`]).
 pub fn parse_graph(doc: &Json) -> Result<GraphDoc, String> {
-    let mut nodes = Vec::new();
-    for n in doc.get("nodes").map(Json::as_array).unwrap_or(&[]) {
-        let id = n
-            .get("id")
-            .and_then(Json::as_str)
-            .ok_or("node without an id")?
-            .to_string();
-        let kind = n
-            .get("type")
-            .and_then(Json::as_str)
-            .ok_or("node without a type")?
-            .to_string();
-        let mut params = HashMap::new();
-        for (k, v) in n.get("params").map(Json::as_object).unwrap_or(&[]) {
-            let value = match v {
-                Json::Num(x) => ParamValue::Number(*x),
-                Json::Str(s) => ParamValue::Text(s.clone()),
-                Json::Bool(b) => ParamValue::Bool(*b),
-                _ => continue,
-            };
-            params.insert(k.clone(), value);
-        }
-        nodes.push(NodeDoc { id, kind, params });
-    }
-    let mut wires = Vec::new();
-    for w in doc.get("wires").map(Json::as_array).unwrap_or(&[]) {
-        let end = |key: &str| -> Option<(String, String)> {
-            let e = w.get(key)?;
-            Some((
-                e.get("node")?.as_str()?.to_string(),
-                e.get("port")?.as_str()?.to_string(),
-            ))
-        };
-        let (Some((from_node, from_port)), Some((to_node, to_port))) = (end("from"), end("to"))
-        else {
-            return Err("malformed wire".into());
-        };
-        wires.push(WireDoc {
-            from_node,
-            from_port,
-            to_node,
-            to_port,
-        });
-    }
-    Ok(GraphDoc { nodes, wires })
+    crate::project::parse_project(doc)
+}
+
+/// Every note of the song by part, for the arrangement overview: `{length, bar, parts:
+/// [{node, name, notes: [[start, duration, key, velocity], ...]}]}`.
+pub fn song_json(engine: &Engine, bars: u32) -> Json {
+    let parts = engine.song_notes(bars, false, 0);
+    let bar = engine.meter().ticks_per_bar();
+    let length = if engine.song_length() > 0 {
+        engine.song_length()
+    } else {
+        bars * bar
+    };
+    // Keep the reply small: at most this many notes per part.
+    const LIMIT: usize = 6000;
+    let parts = parts
+        .iter()
+        .map(|p| {
+            let notes = p
+                .notes
+                .iter()
+                .take(LIMIT)
+                .map(|n| {
+                    let (key, _) = n.pitch.tuning().to_midi(n.pitch.step());
+                    Json::Arr(vec![
+                        Json::Num(n.start as f64),
+                        Json::Num(n.duration as f64),
+                        Json::Num(key as f64),
+                        Json::Num(n.velocity as f64),
+                    ])
+                })
+                .collect();
+            Json::obj(vec![
+                ("node", Json::str(p.node.as_str())),
+                ("name", Json::str(crate::smf::part_name(engine, &p.node))),
+                ("notes", Json::Arr(notes)),
+            ])
+        })
+        .collect();
+    Json::obj(vec![
+        ("length", Json::Num(length as f64)),
+        ("bar", Json::Num(bar as f64)),
+        ("parts", Json::Arr(parts)),
+    ])
 }
 
 pub fn report_json(report: &CompileReport) -> Json {

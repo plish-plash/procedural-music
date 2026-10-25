@@ -119,7 +119,7 @@ async fn open_project() -> Result<Option<(String, String)>, String> {
     Ok(Some((path.display().to_string(), contents)))
 }
 
-/// Renders `bars` bars of the current patch through the built-in instruments (faster
+/// Renders the arrangement (or `bars` bars without one) through the built-in instruments (faster
 /// than real time) and saves a WAV file. Returns the path, or None if cancelled.
 #[tauri::command]
 async fn export_wav(state: tauri::State<'_, Arc<Shared>>, bars: u32) -> Result<Option<String>, String> {
@@ -140,6 +140,77 @@ async fn export_wav(state: tauri::State<'_, Arc<Shared>>, bars: u32) -> Result<O
     std::fs::write(&path, pm_synth::wav::encode_stereo(&audio, RATE))
         .map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
     Ok(Some(path.display().to_string()))
+}
+
+/// Exports the arrangement (or `bars` bars without one) as a standard MIDI file, one
+/// track per part. Returns the path, or None if cancelled.
+#[tauri::command]
+async fn export_midi(state: tauri::State<'_, Arc<Shared>>, bars: u32) -> Result<Option<String>, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("Export MIDI file")
+        .add_filter("Standard MIDI file", &["mid"])
+        .set_file_name("song.mid")
+        .save_file()
+    else {
+        return Ok(None);
+    };
+    let bytes = {
+        let engine = state.engine.lock().unwrap();
+        pm_engine::smf::export(&engine, bars.clamp(1, 999), salt())
+    };
+    std::fs::write(&path, bytes).map_err(|e| format!("couldn't write {}: {e}", path.display()))?;
+    Ok(Some(path.display().to_string()))
+}
+
+/// The folder holding saved groups (the subgraph library).
+fn library_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("library");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// A file name for a library entry: letters, digits, spaces, dashes and underscores.
+fn library_file(name: &str) -> Result<String, String> {
+    let clean: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if clean.is_empty() {
+        return Err("give the group a name first".into());
+    }
+    Ok(format!("{clean}.pmgroup"))
+}
+
+/// Saved groups as (name, contents).
+#[tauri::command]
+fn library_list(app: tauri::AppHandle) -> Result<Vec<(String, String)>, String> {
+    let dir = library_dir(&app)?;
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("pmgroup") {
+            continue;
+        }
+        if let (Some(stem), Ok(text)) = (path.file_stem().and_then(|s| s.to_str()), std::fs::read_to_string(&path)) {
+            out.push((stem.to_string(), text));
+        }
+    }
+    out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+    Ok(out)
+}
+
+#[tauri::command]
+fn library_save(app: tauri::AppHandle, name: String, contents: String) -> Result<(), String> {
+    let path = library_dir(&app)?.join(library_file(&name)?);
+    std::fs::write(&path, contents).map_err(|e| format!("couldn't save {}: {e}", path.display()))
+}
+
+#[tauri::command]
+fn library_delete(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    let path = library_dir(&app)?.join(library_file(&name)?);
+    std::fs::remove_file(&path).map_err(|e| format!("couldn't remove {}: {e}", path.display()))
 }
 
 fn main() {
@@ -171,7 +242,17 @@ fn main() {
 
     tauri::Builder::default()
         .manage(shared)
-        .invoke_handler(tauri::generate_handler![engine, midi_ports, save_project, open_project, export_wav])
+        .invoke_handler(tauri::generate_handler![
+            engine,
+            midi_ports,
+            save_project,
+            open_project,
+            export_wav,
+            export_midi,
+            library_list,
+            library_save,
+            library_delete
+        ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 // Release any sounding notes before the app goes away.

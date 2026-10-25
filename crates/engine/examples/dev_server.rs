@@ -105,6 +105,16 @@ fn serve(mut stream: TcpStream, state: &State) -> std::io::Result<()> {
         let reply = match command {
             "midi_ports" => Ok(Json::Arr(vec![Json::str("Dev server (no MIDI)")])),
             "notes_sent" => Ok(Json::Num(state.notes_sent.load(Ordering::Relaxed) as f64)),
+            "export_midi" => {
+                let bars = args.get("bars").and_then(Json::as_f64).unwrap_or(8.0) as u32;
+                let bytes = {
+                    let engine = state.engine.lock().unwrap();
+                    pm_engine::smf::export(&engine, bars, 1)
+                };
+                std::fs::write("export.mid", bytes)
+                    .map(|_| Json::str("export.mid"))
+                    .map_err(|e| e.to_string())
+            }
             "export_wav" => {
                 let bars = args.get("bars").and_then(Json::as_f64).unwrap_or(8.0) as u32;
                 let (doc, bpm) = {

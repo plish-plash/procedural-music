@@ -34,6 +34,38 @@ pub struct WireDoc {
 pub struct GraphDoc {
     pub nodes: Vec<NodeDoc>,
     pub wires: Vec<WireDoc>,
+    /// The arrangement, in order. Empty means the graph simply plays from bar 1.
+    pub sections: Vec<SectionDoc>,
+    /// Part name (the title of the top-level group) for nodes inside groups.
+    pub parts: HashMap<String, String>,
+}
+
+/// One section of the arrangement.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SectionDoc {
+    pub name: String,
+    pub bars: u32,
+    /// Tempo for this section; `None` uses the song tempo.
+    pub bpm: Option<f64>,
+    /// Parameter values that differ in this section: (node id, parameter, value), sorted.
+    pub overrides: Vec<(String, String, ParamValue)>,
+}
+
+impl GraphDoc {
+    /// The graph as it plays in one section: its parameter overrides applied.
+    pub fn with_overrides(&self, overrides: &[(String, String, ParamValue)]) -> GraphDoc {
+        let mut doc = GraphDoc {
+            nodes: self.nodes.clone(),
+            wires: self.wires.clone(),
+            ..Default::default()
+        };
+        for (node, param, value) in overrides {
+            if let Some(n) = doc.nodes.iter_mut().find(|n| &n.id == node) {
+                n.params.insert(param.clone(), value.clone());
+            }
+        }
+        doc
+    }
 }
 
 /// The time window and settings for one evaluation.
@@ -51,6 +83,22 @@ pub struct EvalContext {
     /// True when slow work must finish now (offline rendering, tests) rather than
     /// continue in the background.
     pub sync: bool,
+    /// The section being played, as [`section_key`] of its name (0 without an arrangement).
+    pub section: u64,
+    /// Which time this section name comes round in the arrangement (1 for the first).
+    pub repeat: u32,
+}
+
+/// A section name as nodes compare it: case and surrounding spaces don't matter.
+pub fn section_key(name: &str) -> u64 {
+    let k = name
+        .trim()
+        .to_lowercase()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x100_0000_01b3)
+        });
+    k.max(1)
 }
 
 impl EvalContext {
@@ -63,6 +111,8 @@ impl EvalContext {
             salt,
             preview: false,
             sync: false,
+            section: 0,
+            repeat: 0,
         }
     }
 }
@@ -383,6 +433,18 @@ impl Graph {
     /// Issues plus a short text preview of every node's output, evaluated over the
     /// first `bars` bars.
     pub fn report(&self, meter: Meter, bars: u32, sync: bool) -> CompileReport {
+        self.report_section(meter, bars, sync, 0, 0)
+    }
+
+    /// Like [`Graph::report`], as heard in a section (see [`EvalContext::section`]).
+    pub fn report_section(
+        &self,
+        meter: Meter,
+        bars: u32,
+        sync: bool,
+        section: u64,
+        repeat: u32,
+    ) -> CompileReport {
         let ctx = EvalContext {
             start: 0,
             end: meter.ticks_per_bar() * bars.max(1),
@@ -390,6 +452,8 @@ impl Graph {
             salt: 0,
             preview: true,
             sync,
+            section,
+            repeat,
         };
         let eval = self.run(&ctx);
         let mut issues = self.issues.clone();
@@ -580,6 +644,7 @@ mod tests {
                 wire("lead", "chords", "play", "chords"),
                 wire("play", "notes", "out", "notes"),
             ],
+            ..Default::default()
         }
     }
 
@@ -666,6 +731,7 @@ mod tests {
                 wire("t1", "chords", "t2", "chords"),
                 wire("t2", "chords", "t1", "chords"),
             ],
+            ..Default::default()
         };
         let g = Graph::compile(&doc);
         let report = g.report(Meter::COMMON, 1, true);
@@ -699,6 +765,7 @@ mod tests {
                 node("m", "mode", &[("degree", ParamValue::Number(3.0))]),
             ],
             wires: vec![wire("s", "scale", "m", "scale")],
+            ..Default::default()
         };
         let r = Graph::compile(&doc).report(Meter::COMMON, 1, true);
         assert_eq!(r.previews[0].1, "D Dorian · D E F G A B C");

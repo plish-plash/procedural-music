@@ -6,6 +6,7 @@ mod note_ops;
 mod output;
 mod rhythm;
 mod sound;
+mod structure;
 mod theory;
 
 use std::collections::HashMap;
@@ -139,6 +140,11 @@ static SPECS: &[&NodeSpec] = &[
     // Counterpoint and analysis
     &counterpoint::COUNTERPOINT,
     &counterpoint::PIANO_ROLL,
+    // Structure
+    &structure::SWITCH_NOTES,
+    &structure::SWITCH_RHYTHM,
+    &structure::SWITCH_CHORD,
+    &structure::SWITCH_SCALE,
     // Built-in sound
     &sound::POLY_SYNTH,
     &sound::MONO_SYNTH,
@@ -196,6 +202,9 @@ pub fn build(
         "counterpoint" => counterpoint::build_counterpoint(&p),
         "split_voices" => counterpoint::build_split(&p),
         "piano_roll" => counterpoint::build_piano_roll(&p),
+        "switch_notes" | "switch_rhythm" | "switch_chord" | "switch_scale" => {
+            structure::build_switch(&p)
+        }
         "midi_out" => output::build_midi_out(&p),
         "poly_synth" | "mono_synth" | "drum_synth" | "mixer" | "fx_filter" | "fx_drive"
         | "fx_chorus" | "fx_delay" | "fx_reverb" | "audio_out" => sound::build(spec.kind, &p),

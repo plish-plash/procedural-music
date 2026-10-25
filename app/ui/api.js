@@ -12,7 +12,7 @@ async function post(path, body) {
   return json;
 }
 
-/** Runs an engine command (specs, set_graph, play, stop, set_bpm, set_clock_ports, status). */
+/** Runs an engine command (see pm_engine::api::handle for the list). */
 export async function call(command, args = null) {
   if (tauri) {
     const text = await tauri.invoke('engine', { command, args: JSON.stringify(args) });
@@ -37,10 +37,50 @@ export async function saveProject(contents, path) {
   return 'untitled.pmpatch';
 }
 
-/** Renders `bars` bars through the built-in instruments and asks where to save the WAV. */
+/** Renders the song (or `bars` bars without one) through the built-in instruments and asks where to save the WAV. */
 export async function exportWav(bars) {
   if (tauri) return tauri.invoke('export_wav', { bars });
   return post('/api/export_wav', { bars });
+}
+
+/** Writes the song (or `bars` bars) as a standard MIDI file, one track per part. */
+export async function exportMidi(bars) {
+  if (tauri) return tauri.invoke('export_midi', { bars });
+  return post('/api/export_midi', { bars });
+}
+
+// The group library: saved groups, shared between projects. In the app they are files in
+// the app's data folder; in a browser they live in local storage.
+const LIBRARY_KEY = 'pm.library';
+
+function browserLibrary() {
+  try {
+    return JSON.parse(localStorage.getItem(LIBRARY_KEY) ?? '{}');
+  } catch {
+    return {};
+  }
+}
+
+/** Saved groups as [name, contents] pairs. */
+export async function libraryList() {
+  if (tauri) return tauri.invoke('library_list');
+  return Object.entries(browserLibrary()).sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+export async function librarySave(name, contents) {
+  if (tauri) return tauri.invoke('library_save', { name, contents });
+  const lib = browserLibrary();
+  lib[name] = contents;
+  localStorage.setItem(LIBRARY_KEY, JSON.stringify(lib));
+  return null;
+}
+
+export async function libraryDelete(name) {
+  if (tauri) return tauri.invoke('library_delete', { name });
+  const lib = browserLibrary();
+  delete lib[name];
+  localStorage.setItem(LIBRARY_KEY, JSON.stringify(lib));
+  return null;
 }
 
 /** Asks for a file. Resolves to [path, contents], or null if cancelled. */

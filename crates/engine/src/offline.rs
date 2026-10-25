@@ -3,10 +3,10 @@
 
 use pm_synth::Rack;
 
-use crate::engine::Engine;
+use crate::engine::{Engine, LoopMode};
 use crate::graph::GraphDoc;
 
-/// Renders `bars` bars of a patch, plus `tail` seconds for releases and echoes, as
+/// Renders the arrangement (or `bars` bars of a patch without one), plus `tail` seconds for releases and echoes, as
 /// interleaved stereo samples.
 pub fn render(
     doc: &GraphDoc,
@@ -22,8 +22,9 @@ pub fn render(
     engine.synchronous = true;
     engine.set_graph(doc);
     engine.set_bpm(0.0, bpm);
-    let beats = (bars * engine.meter().beats as u32) as f64 * 4.0 / engine.meter().unit as f64;
-    let length = beats * 60.0 / bpm;
+    // With an arrangement, the whole song once through (and `bars` is ignored).
+    engine.set_loop(LoopMode::Off);
+    let length = engine.duration(bars);
     engine.play(0.0, salt);
     // `play` starts the music 50 ms in; drop that lead-in from the output.
     let lead_in = 0.05;
@@ -96,6 +97,7 @@ mod tests {
                 wire("d", "notes", "k", "notes"),
                 wire("k", "audio", "o", "audio"),
             ],
+            ..Default::default()
         };
         let sr = 48_000;
         let audio = render(&doc, 120.0, 1, 0.5, sr, 1);
@@ -116,5 +118,39 @@ mod tests {
             }
         }
         assert!(audio.iter().all(|x| x.is_finite() && x.abs() <= 1.0));
+    }
+}
+
+#[cfg(test)]
+mod song_tests {
+    use super::*;
+    use crate::api::parse_graph;
+    use crate::json::Json;
+
+    #[test]
+    fn renders_the_whole_arrangement_with_its_tempos() {
+        let doc = parse_graph(
+            &Json::parse(
+                r#"{"nodes":[{"id":"p","type":"pattern","params":{"pattern":"x","step":"1/4"}},
+                  {"id":"d","type":"drum","params":{}},{"id":"k","type":"drum_synth","params":{}},
+                  {"id":"o","type":"audio_out","params":{}}],
+                 "wires":[{"from":{"node":"p","port":"rhythm"},"to":{"node":"d","port":"rhythm"}},
+                          {"from":{"node":"d","port":"notes"},"to":{"node":"k","port":"notes"}},
+                          {"from":{"node":"k","port":"audio"},"to":{"node":"o","port":"audio"}}],
+                 "arrangement":{"sections":[{"name":"A","bars":1},{"name":"B","bars":1,"bpm":240}]}}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let sr = 8000;
+        let audio = render(&doc, 120.0, 99, 0.0, sr, 1);
+        // 2 s of A at 120 bpm + 1 s of B at 240 bpm.
+        assert_eq!(audio.len(), 2 * 3 * sr as usize);
+        let left: Vec<f32> = audio.chunks(2).map(|f| f[0]).collect();
+        let onset = |t: f64| {
+            let i = (t * sr as f64) as usize;
+            left[i..i + 80].iter().fold(0.0f32, |m, x| m.max(x.abs())) > 0.1
+        };
+        assert!(onset(0.0) && onset(1.5) && onset(2.0) && onset(2.25) && onset(2.75));
     }
 }

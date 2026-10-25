@@ -14,14 +14,17 @@ mod graph;
 pub mod json;
 mod nodes;
 pub mod offline;
+pub mod project;
 mod rng;
+pub mod smf;
 mod spec;
 mod timeline;
 mod value;
 
-pub use engine::{Engine, MidiMessage, DEFAULT_PORT};
+pub use engine::{Engine, LoopMode, MidiMessage, Position, Section, DEFAULT_PORT};
 pub use graph::{
-    module_id, CompileReport, EvalContext, Graph, GraphDoc, NodeDoc, NodeIssue, SinkOutput, WireDoc,
+    module_id, section_key, CompileReport, EvalContext, Graph, GraphDoc, NodeDoc, NodeIssue,
+    SectionDoc, SinkOutput, WireDoc,
 };
 pub use nodes::{solve_generation, spec_for, specs, Sink};
 pub use spec::{NodeSpec, ParamKind, ParamSpec, ParamValue, PortSpec, PortType};

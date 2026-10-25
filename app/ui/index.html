@@ -10,21 +10,34 @@
   <header id="toolbar">
     <div class="group">
       <span class="brand">Procedural Music</span>
-      <button id="btn-new" title="New patch (Ctrl+N)">New</button>
+      <div class="menu-wrap">
+        <button id="btn-new" title="New song or empty patch">New ▾</button>
+        <div id="new-menu" class="dropdown" hidden></div>
+      </div>
       <button id="btn-open" title="Open patch (Ctrl+O)">Open</button>
-      <button id="btn-save" title="Save patch (Ctrl+S)">Save</button>
-      <button id="btn-export" title="Render the built-in instruments to a WAV file">Export WAV</button>
+      <button id="btn-save" title="Save patch (Ctrl+S; Shift: save as)">Save</button>
+      <div class="menu-wrap">
+        <button id="btn-export" title="Export audio or MIDI">Export ▾</button>
+        <div id="export-menu" class="dropdown" hidden></div>
+      </div>
       <div class="menu-wrap">
         <button id="btn-examples">Examples ▾</button>
         <div id="examples-menu" class="dropdown" hidden></div>
       </div>
+      <button id="btn-undo" class="icon-btn" title="Undo (Ctrl+Z)">↶</button>
+      <button id="btn-redo" class="icon-btn" title="Redo (Ctrl+Y)">↷</button>
     </div>
     <div class="group transport">
       <button id="btn-play" class="play" title="Play / stop (Space)"><span class="icon">▶</span><span class="label">Play</span></button>
       <label class="bpm">BPM <input id="bpm" type="number" min="20" max="400" step="1" value="110"></label>
       <span id="position" class="position">1.1</span>
+      <span id="section-name" class="section-name" hidden></span>
     </div>
     <div class="group">
+      <div id="mode" class="segmented" title="Compose: arrange a song on the timeline. Perform: loop sections and cue them live; edits wait for the bar line.">
+        <button data-mode="compose" class="on">Compose</button>
+        <button data-mode="perform">Perform</button>
+      </div>
       <label class="clock" title="Send MIDI clock and start/stop to this port">Clock
         <select id="clock-port"><option value="">Off</option></select>
       </label>
@@ -37,16 +50,20 @@
       <svg id="wires" width="1" height="1"></svg>
       <div id="nodes"></div>
     </div>
+    <nav id="crumbs" hidden></nav>
     <div id="empty-hint" hidden>
       <p>Double-click anywhere to add a node, or open an example from the toolbar.</p>
     </div>
   </main>
 
+  <section id="timeline"></section>
+  <section id="cue-bar"></section>
+
   <footer id="statusbar">
     <span id="file-name">Untitled</span>
     <span id="status-msg"></span>
     <span id="audio-status"></span>
-    <span class="hint">Double-click: add node · Drag output → input: connect · Del: remove · Wheel: zoom · Drag background: pan</span>
+    <span class="hint">Double-click: add node · Ctrl+G: group · Shift-drag: select · Del: remove · Wheel: zoom</span>
   </footer>
 
   <div id="add-menu" hidden>

@@ -1,14 +1,13 @@
 // Built-in example patches (the acceptance patches from the design document).
 
-const wire = (fromNode, fromPort, toNode, toPort) => ({ from: { node: fromNode, port: fromPort }, to: { node: toNode, port: toPort } });
-
-// Instrument presets used below.
-const PLUCK = { wave: 'Saw', detune: 6, cutoff: 800, resonance: 25, env_amount: 3, filter_decay: 200, attack: 2, decay: 300, sustain: 20, release: 300, level: 2 };
-const PAD = { wave: 'Saw', detune: 14, cutoff: 1100, resonance: 10, env_amount: 1.2, filter_decay: 1500, attack: 450, decay: 1200, sustain: 80, release: 1400, level: -7 };
-const BASS = { wave: 'Saw', detune: 4, cutoff: 380, resonance: 35, env_amount: 2.6, filter_decay: 160, attack: 2, decay: 220, sustain: 55, release: 90, glide: 30, legato: true, level: -3 };
-const LEAD = { wave: 'Square', detune: 0, cutoff: 1800, resonance: 20, env_amount: 1.8, filter_decay: 140, attack: 2, decay: 180, sustain: 20, release: 160, level: -9 };
+import { wire, PLUCK, PAD, BASS, LEAD, fullSong } from './templates.js';
 
 export const EXAMPLES = [
+  {
+    name: 'Full song',
+    description: 'Drums, bass, pads and lead as groups, arranged Intro / A / B / A / Outro. B moves up a fourth with busier drums. Open a group to see inside.',
+    doc: fullSong(),
+  },
   {
     name: 'Modal explorer',
     description: 'One scale, seven modes: move the Degree slider while it plays.',
