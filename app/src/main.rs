@@ -18,6 +18,8 @@ use tauri::Manager;
 struct Shared {
     engine: Mutex<Engine>,
     midi: Mutex<midi::Midi>,
+    /// The input being followed for MIDI clock, kept open while set.
+    clock_in: Mutex<Option<midir::MidiInputConnection<()>>>,
     audio: audio::Audio,
     start: Instant,
 }
@@ -84,6 +86,41 @@ fn engine(state: tauri::State<'_, Arc<Shared>>, command: String, args: String) -
 fn midi_ports(state: tauri::State<'_, Arc<Shared>>) -> Vec<String> {
     state.midi.lock().unwrap().reset();
     midi::port_names()
+}
+
+/// Lists MIDI input ports (for following an external clock).
+#[tauri::command]
+fn midi_in_ports() -> Vec<String> {
+    midi::input_names()
+}
+
+/// Follows MIDI clock and start/stop from an input port, or stops following with no port.
+#[tauri::command]
+fn set_clock_in(state: tauri::State<'_, Arc<Shared>>, port: Option<String>) -> Result<(), String> {
+    let mut slot = state.clock_in.lock().unwrap();
+    // Close the old port first, so reopening the same one works.
+    if let Some(old) = slot.take() {
+        old.close();
+    }
+    let follow = match port.filter(|p| !p.is_empty()) {
+        None => false,
+        Some(name) => {
+            let s = state.inner().clone();
+            *slot = Some(midi::listen_clock(&name, move |byte| {
+                let now = s.now();
+                let out = {
+                    let mut engine = s.engine.lock().unwrap();
+                    let out = engine.clock_message(now, byte, salt());
+                    s.flush_audio(&mut engine);
+                    out
+                };
+                s.send(&out);
+            })?);
+            true
+        }
+    };
+    state.engine.lock().unwrap().set_clock_follow(follow);
+    Ok(())
 }
 
 /// Saves a project. Without a path, asks where. Returns the path written, or None if cancelled.
@@ -224,6 +261,7 @@ fn main() {
             engine
         }),
         midi: Mutex::new(midi::Midi::default()),
+        clock_in: Mutex::new(None),
         audio: audio::start(start),
         start,
     });
@@ -251,6 +289,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             engine,
             midi_ports,
+            midi_in_ports,
+            set_clock_in,
             save_project,
             open_project,
             export_wav,

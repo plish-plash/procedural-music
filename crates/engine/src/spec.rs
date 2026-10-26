@@ -109,6 +109,28 @@ pub enum ParamKind {
     },
     /// A MIDI output port name, chosen from the ports the app finds.
     MidiPort,
+    /// A set of pitch classes as note names ("C D Eb G A"), picked on a one-octave keyboard.
+    PitchSet {
+        default: &'static str,
+    },
+}
+
+/// Settings shown only while another setting of the same node has one of some values:
+/// (node kind, setting, the setting it depends on, the values that show it).
+static CONDITIONS: &[(&str, &str, &str, &[&str])] = &[
+    ("scale", "notes", "scale", &["Custom"]),
+    ("transpose", "semitones", "by", &["Semitones"]),
+    ("transpose", "steps", "by", &["Scale steps"]),
+    ("midi_cc", "cc", "message", &["Control change"]),
+];
+
+/// When `param` of `node` is shown only for some values of another setting: that setting
+/// and those values.
+pub fn condition(node: &str, param: &str) -> Option<(&'static str, &'static [&'static str])> {
+    CONDITIONS
+        .iter()
+        .find(|(k, p, _, _)| *k == node && *p == param)
+        .map(|&(_, _, on, values)| (on, values))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -126,7 +148,7 @@ impl ParamSpec {
     pub fn automatable(&self, node: &NodeSpec) -> bool {
         matches!(self.kind, ParamKind::Number { .. } | ParamKind::LogNumber { .. })
             && self.name != "seed"
-            && !matches!(node.kind, "counterpoint" | "piano_roll" | "midi_out")
+            && !matches!(node.kind, "counterpoint" | "piano_roll" | "midi_out" | "midi_cc")
     }
 
     /// `value` snapped to this parameter's grid (its step, or three significant figures
@@ -151,7 +173,9 @@ impl ParamSpec {
             ParamKind::Number { default, .. } | ParamKind::LogNumber { default, .. } => {
                 ParamValue::Number(default)
             }
-            ParamKind::Text { default } => ParamValue::Text(default.to_string()),
+            ParamKind::Text { default } | ParamKind::PitchSet { default } => {
+                ParamValue::Text(default.to_string())
+            }
             ParamKind::Choice { default, .. } => ParamValue::Text(default.to_string()),
             ParamKind::Bool { default } => ParamValue::Bool(default),
             ParamKind::MidiPort => ParamValue::Text(String::new()),
@@ -201,7 +225,10 @@ impl<'a> Params<'a> {
                 ParamKind::Number { min, max, .. } | ParamKind::LogNumber { min, max, .. },
             ) => ParamValue::Number(n.clamp(min, max)),
             (Some(v @ ParamValue::Number(_)), _) => v.clone(),
-            (Some(v @ ParamValue::Text(_)), ParamKind::Text { .. } | ParamKind::MidiPort) => {
+            (
+                Some(v @ ParamValue::Text(_)),
+                ParamKind::Text { .. } | ParamKind::MidiPort | ParamKind::PitchSet { .. },
+            ) => {
                 v.clone()
             }
             (Some(ParamValue::Text(t)), ParamKind::Choice { options, default }) => {

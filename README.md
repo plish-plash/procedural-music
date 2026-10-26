@@ -25,9 +25,17 @@ cargo run --manifest-path app\Cargo.toml
 The first build downloads and compiles Tauri, which takes a few minutes.
 
 The examples play through the built-in instruments on your default audio output. To
-drive external synths instead, end a chain in **MIDI out** and pick the port; set **MIDI ▾ › Clock out**
-to send MIDI clock (**Refresh ports** is there too). **File ▾ › Export WAV audio** renders the built-in instruments to a
-file faster than real time.
+drive external synths instead, end a chain in **MIDI out** and pick the port. **MIDI CC out**
+sends a Control (an LFO, Ramp or Steps) as control changes, pitch bend or channel pressure.
+The **MIDI ▾** menu holds the rest of the MIDI setup:
+- **Clock out** sends MIDI clock and start/stop to a port.
+- **Clock in** follows another device's clock: its tempo and Start/Continue/Stop drive
+  playback (the BPM box shows the incoming tempo while following).
+- **Latency** shifts everything sent to a port by some milliseconds, so external synths
+  line up with the built-in sound. It's saved on this computer, not in the project.
+- **Refresh ports** looks for newly connected devices.
+
+**File ▾ › Export WAV audio** renders the built-in instruments to a file faster than real time.
 
 ### Using the editor
 
@@ -52,16 +60,18 @@ file faster than real time.
   will start, with what was last heard.
 - A **Harmonic context** node sets the song's key and chords: any scale or chord input
   left unwired anywhere (inside groups too) reads them, shown as "(context)" on the port.
-  A wire always wins. The Song template feeds it from its Progression, so Bass and Pads
-  follow along without wires.
-- **Randomness**: random nodes (Random walk, Arpeggiator's Random pattern, Counterpoint's
-  Variety) play something new on every Play. 🔒 on the node (or in the inspector) locks
+  A wire always wins. The Song template feeds it from a key (a Scale node) and a
+  Progression, so Bass, Pads and Lead follow along without wires.
+- A **Progression** reads Roman numerals in the key wired into its Key input (a Scale node,
+  or the Harmonic context); change the key and the chords follow. Chord symbols need no key.
+- **Randomness**: random nodes (Random walk, Markov, Probability, Humanize, Arpeggiator's
+  Random pattern, Counterpoint's Variety) play something new on every Play. 🔒 on the node (or in the inspector) locks
   one, keeping what it's playing now, and it then plays the same every time; 🎲 rerolls
   a locked node. In the toolbar, **🔓 Fresh / 🔒 Locked** does the same for the whole
   song, and 🎲 there rerolls everything unlocked (or the song's seed, when locked).
   Exports match what you heard.
 - **Pin** (●) the preview or a setting in the inspector to show it on the node too. Source
-  nodes (Scale, Progression, Pattern, LFO…), Counterpoint and Piano roll show their
+  nodes (Scale, Pattern, LFO…), Progression, Counterpoint and analysis nodes show their
   preview by default.
 - A pinned number setting gets a violet input on the node: wire a **Control** node into it
   to automate the setting. *LFO* repeats a wave between two values, *Ramp* moves from one
@@ -75,6 +85,30 @@ file faster than real time.
   a rhythm as clicks, through a preview instrument, even while the song plays.
 - Hover a wire to see what it carries: the value on that output, drawn like a preview,
   with its text. Wires into and out of groups show the value from the node that makes it.
+- **Harmony nodes** work in the key (the key input, or the Harmonic context when unwired):
+  *Chord from degree* builds the chord on a degree (pin the degree and drive it with Steps
+  to write a progression), *Extend* stacks 7ths to 13ths in the key, *Substitute* swaps in
+  tritone, relative or parallel chords, *Borrow* takes chords on chosen degrees from a
+  parallel mode (iv, ♭VI, ♭VII), and *Secondary dominant* slips V7 of each target chord in
+  before it. *Transpose* moves chords by semitones or by scale steps, *Transpose key* moves
+  a scale, and *Scale set* intersects, joins or subtracts two scales. A Scale node set to
+  **Custom** gets a one-octave picker for its notes.
+- **Voicing nodes** place chords: *Voice*, *Voice lead*, *Drop voicing*, *Invert*, *Spread*
+  (bass kept, the rest spread over some octaves) and *Close / open*.
+- **Melody nodes** play one note per rhythm hit: the *Arpeggiator* runs through each chord's
+  tones; *Degree sequencer*, *Random walk*, *Markov* (learns which degree follows which from a melody,
+  typed as degrees or wired into Train, and improvises in its style), and *Contour* (a line
+  that rises, falls, arches or waves over each phrase) play from a scale. *Motif transform* plays each phrase
+  of a melody backwards, upside down (in the key), stretched or squeezed.
+- **Rhythm nodes** build and bend patterns: *Pattern*, *Euclidean*, *Polyrhythm* (3 against
+  4 and the like), *Combine*, *Rotate*, *Subdivide* (ratchets), *Swing*, *Accent* (an accent
+  pattern over the hits) and *Probability* (each hit plays with some chance, rolled again
+  every pass; lock it to keep the same hits). Hits with a chance show faded in the step grid.
+- **Note nodes** reshape parts: *Octave*, *Quantize to scale*, *Velocity* (with a curve),
+  *Humanize* (small random timing and loudness), *Legato* (hold each note to the next),
+  *Note delay* (with echoes), *Note filter*, *Split by range*, *Repeat bars* (loop the first
+  bars of every block into a riff), *Merge* and *Split voices*. *Harmonizer* adds a
+  parallel third or sixth in the key.
 - **Analysis** nodes show harmony as it plays: *Circle of fifths* (the key on the rim,
   the chord as a shape, the path of the roots), *Tonnetz* (the chord's triads on the
   grid of fifths and thirds) and *Interval matrix* (every interval in the chord, and its

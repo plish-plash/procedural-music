@@ -123,6 +123,7 @@ mod tests {
     fn theory_views_show_wired_or_context_harmony() {
         let doc = GraphDoc {
             nodes: vec![
+                node("k", "scale", &[]),
                 node("p", "progression", &[("chords", ParamValue::Text("ii V I".into()))]),
                 node("circle", "circle_of_fifths", &[]),
                 node("net", "tonnetz", &[]),
@@ -130,8 +131,9 @@ mod tests {
                 node("iv", "interval_matrix", &[]),
             ],
             wires: vec![
+                wire("k", "scale", "p", "key"),
                 wire("p", "chords", "circle", "chords"),
-                wire("p", "key", "circle", "key"),
+                wire("k", "scale", "circle", "key"),
                 wire("p", "chords", "net", "chords"),
                 wire("p", "chords", "ctx", "chords"),
             ],

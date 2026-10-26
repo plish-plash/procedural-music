@@ -38,6 +38,13 @@
           <label class="menu-field" title="Send MIDI clock and start/stop to this port">Clock out
             <select id="clock-port"><option value="">Off</option></select>
           </label>
+          <label class="menu-field" title="Follow the tempo and start/stop of MIDI clock from this input">Clock in
+            <select id="clock-in-port"><option value="">Off</option></select>
+          </label>
+          <hr>
+          <div class="menu-heading" title="Shifts everything sent to a port, so external synths line up with the built-in sound. Positive values send later.">Latency (ms)</div>
+          <div id="midi-latency"></div>
+          <hr>
           <button id="btn-ports" class="menu-item"><span class="mi-title">Refresh ports</span><small>Look for MIDI ports again</small></button>
         </div>
       </div>

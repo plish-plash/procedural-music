@@ -72,6 +72,39 @@ pub enum Sink {
     Midi { port: String, channel: u8 },
     /// The node's own instrument in the audio rack.
     Instrument,
+    /// A control value sent as a MIDI message on a port (empty = default) and zero-based channel.
+    Control {
+        port: String,
+        channel: u8,
+        message: ControlMessage,
+    },
+}
+
+/// The MIDI message a control value becomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ControlMessage {
+    /// A control change on this controller number (0–127 values).
+    Cc(u8),
+    /// Pitch bend, from −1 (all the way down) through 0 (centre) to 1.
+    PitchBend,
+    /// Channel pressure (aftertouch), 0–127.
+    Pressure,
+}
+
+impl ControlMessage {
+    /// The bytes that send `value` on `channel` (zero-based).
+    pub fn bytes(self, channel: u8, value: f64) -> Vec<u8> {
+        let seven = |v: f64| v.round().clamp(0.0, 127.0) as u8;
+        let ch = channel & 0x0f;
+        match self {
+            ControlMessage::Cc(cc) => vec![0xb0 | ch, cc & 0x7f, seven(value)],
+            ControlMessage::Pressure => vec![0xd0 | ch, seven(value)],
+            ControlMessage::PitchBend => {
+                let v = ((value.clamp(-1.0, 1.0) + 1.0) * 8192.0).round().clamp(0.0, 16383.0) as u16;
+                vec![0xe0 | ch, (v & 0x7f) as u8, (v >> 7) as u8]
+            }
+        }
+    }
 }
 
 /// Input values for one evaluation, already converted to each port's type.
@@ -114,22 +147,39 @@ static SPECS: &[&NodeSpec] = &[
     &theory::SCALE,
     &theory::CHORD,
     &theory::PROGRESSION,
+    &theory::CHORD_DEGREE,
     // Theory transforms
     &theory::MODE,
     &theory::TRANSPOSE,
+    &theory::TRANSPOSE_KEY,
+    &theory::EXTEND,
+    &theory::SUBSTITUTE,
+    &theory::BORROW,
+    &theory::SECONDARY,
+    &theory::SCALE_SET,
     &theory::VOICE,
     &theory::VOICE_LEAD,
     &theory::DROP,
     &theory::INVERT,
+    &theory::SPREAD,
+    &theory::CLOSE_OPEN,
     // Rhythm
     &rhythm::PATTERN,
     &rhythm::EUCLID,
+    &rhythm::POLYRHYTHM,
     &rhythm::COMBINE,
+    &rhythm::ROTATE,
+    &rhythm::SUBDIVIDE,
     &rhythm::SWING,
+    &rhythm::ACCENT,
+    &rhythm::PROBABILITY,
     // Melody and parts
     &melody::ARP,
     &melody::SEQUENCER,
     &melody::RANDOM_WALK,
+    &melody::MARKOV,
+    &melody::CONTOUR,
+    &melody::MOTIF,
     &melody::PLAY_CHORDS,
     &melody::CHORD_ROOT,
     &melody::DRUM,
@@ -137,10 +187,17 @@ static SPECS: &[&NodeSpec] = &[
     &note_ops::OCTAVE,
     &note_ops::QUANTIZE,
     &note_ops::VELOCITY,
+    &note_ops::HUMANIZE,
+    &note_ops::LEGATO,
+    &note_ops::NOTE_DELAY,
+    &note_ops::FILTER,
+    &note_ops::SPLIT_RANGE,
+    &note_ops::REPEAT_BARS,
     &note_ops::MERGE,
     &counterpoint::SPLIT,
     // Counterpoint and analysis
     &counterpoint::COUNTERPOINT,
+    &note_ops::HARMONIZER,
     &counterpoint::PIANO_ROLL,
     &analysis::CIRCLE,
     &analysis::TONNETZ,
@@ -168,6 +225,7 @@ static SPECS: &[&NodeSpec] = &[
     // Output
     &sound::AUDIO_OUT,
     &output::MIDI_OUT,
+    &output::MIDI_CC,
 ];
 
 /// Every node spec, in menu order.
@@ -195,13 +253,37 @@ pub fn build(
         "voice_lead" => theory::build_voice_lead(&p),
         "drop" => theory::build_drop(&p),
         "invert" => theory::build_invert(&p),
+        "chord_degree" => theory::build_chord_degree(&p),
+        "transpose_key" => theory::build_transpose_key(&p),
+        "extend" => theory::build_extend(&p),
+        "substitute" => theory::build_substitute(&p),
+        "borrow" => theory::build_borrow(&p),
+        "secondary_dominant" => theory::build_secondary(&p),
+        "scale_set" => theory::build_scale_set(&p),
+        "spread" => theory::build_spread(&p),
+        "close_open" => theory::build_close_open(&p),
         "pattern" => rhythm::build_pattern(&p),
         "euclid" => rhythm::build_euclid(&p),
         "combine" => rhythm::build_combine(&p),
         "swing" => rhythm::build_swing(&p),
+        "probability" => rhythm::build_probability(&p),
+        "accent" => rhythm::build_accent(&p),
+        "rotate" => rhythm::build_rotate(&p),
+        "subdivide" => rhythm::build_subdivide(&p),
+        "polyrhythm" => rhythm::build_polyrhythm(&p),
+        "humanize" => note_ops::build_humanize(&p),
+        "legato" => note_ops::build_legato(&p),
+        "note_delay" => note_ops::build_note_delay(&p),
+        "note_filter" => note_ops::build_filter(&p),
+        "split_range" => note_ops::build_split_range(&p),
+        "repeat_bars" => note_ops::build_repeat_bars(&p),
+        "harmonizer" => note_ops::build_harmonizer(&p),
         "arp" => melody::build_arp(&p),
         "sequencer" => melody::build_sequencer(&p),
         "random_walk" => melody::build_random_walk(&p),
+        "markov" => melody::build_markov(&p),
+        "contour" => melody::build_contour(&p),
+        "motif" => melody::build_motif(&p),
         "play_chords" => melody::build_play_chords(&p),
         "chord_root" => melody::build_chord_root(&p),
         "drum" => melody::build_drum(&p),
@@ -221,6 +303,7 @@ pub fn build(
             structure::build_switch(&p)
         }
         "midi_out" => output::build_midi_out(&p),
+        "midi_cc" => output::build_midi_cc(&p),
         "poly_synth" | "mono_synth" | "drum_synth" | "mixer" | "fx_filter" | "fx_drive"
         | "fx_chorus" | "fx_delay" | "fx_reverb" | "audio_out" => sound::build(spec.kind, &p),
         other => Err(format!("unknown node kind '{other}'")),

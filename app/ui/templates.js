@@ -9,6 +9,14 @@ export const PAD = { wave: 'Saw', detune: 14, cutoff: 1100, resonance: 10, env_a
 export const BASS = { wave: 'Saw', detune: 4, cutoff: 380, resonance: 35, env_amount: 2.6, filter_decay: 160, attack: 2, decay: 220, sustain: 55, release: 90, glide: 30, legato: true, level: -3 };
 export const LEAD = { wave: 'Square', detune: 0, cutoff: 1800, resonance: 20, env_amount: 1.8, filter_decay: 140, attack: 2, decay: 180, sustain: 20, release: 160, level: -9 };
 
+/** Scale node settings for a key written as text ("Eb major", "A harmonic minor"). */
+export function keyParams(text) {
+  const m = /^\s*([A-Ga-g])([#b]?)\s*(.*)$/.exec(String(text ?? ''));
+  if (!m) return { root: 'C', scale: 'Major' };
+  const name = m[3].trim().toLowerCase();
+  return { root: m[1].toUpperCase() + m[2], scale: name ? name[0].toUpperCase() + name.slice(1) : 'Major' };
+}
+
 /** A group node. `inputs`/`outputs` are [name, type] pairs; `exposed` lists 'node.param'. */
 export function group(id, title, x, y, { nodes, wires, inputs = [], outputs = [], exposed = [], labels = {}, io }) {
   const xs = nodes.map((n) => n.x);
@@ -86,11 +94,10 @@ export function padsPart(id, x, y) {
   });
 }
 
-/** An arpeggio over the chords, playing only in the sections listed in its switch. Its
- * chords are wired in: from the context, a scale input would get the key, not the chord. */
+/** An arpeggio over the chords (from the harmonic context), playing only in the sections
+ * listed in its switch. */
 export function leadPart(id, x, y, sections = 'A, B') {
   return group(id, 'Lead', x, y, {
-    inputs: [['chords', 'chord']],
     outputs: [['audio', 'audio']],
     exposed: ['sw.a', 'arp.pattern', 'r.hits'],
     labels: { 'sw.a': 'Plays in', 'r.hits': 'Notes per bar' },
@@ -102,18 +109,19 @@ export function leadPart(id, x, y, sections = 'A, B') {
       { id: 'fx', type: 'fx_delay', x: 1260, y: 0, params: { time: '1/8 dotted', feedback: 40, mix: 30, ping_pong: true, tone: 3000 } },
     ],
     wires: [
-      wire('@in', 'chords', 'arp', 'scale'), wire('r', 'rhythm', 'arp', 'rhythm'), wire('arp', 'notes', 'sw', 'a'),
+      wire('r', 'rhythm', 'arp', 'rhythm'), wire('arp', 'notes', 'sw', 'a'),
       wire('sw', 'out', 'syn', 'notes'), wire('syn', 'audio', 'fx', 'audio'), wire('fx', 'audio', '@out', 'audio'),
     ],
   });
 }
 
-/** Progression → harmonic context (which the bass and pads follow) and the lead → mixer →
- * reverb → out, positioned for the canvas. */
+/** Key and progression → harmonic context (which every part follows) and the parts →
+ * mixer → reverb → out, positioned for the canvas. */
 export function songGraph({ chords, key, leadSections = 'A, B' }) {
   return {
     nodes: [
-      { id: 'prog', type: 'progression', x: 40, y: 360, params: { chords, notation: 'Roman numerals', key, bars: 1, octave: 4 } },
+      { id: 'key', type: 'scale', x: 40, y: 140, params: keyParams(key) },
+      { id: 'prog', type: 'progression', x: 40, y: 360, params: { chords, notation: 'Roman numerals', bars: 1, octave: 4 } },
       { id: 'ctx', type: 'context', x: 40, y: 620, params: {} },
       drumsPart('drums', 420, 0),
       bassPart('bass', 420, 300),
@@ -124,7 +132,7 @@ export function songGraph({ chords, key, leadSections = 'A, B' }) {
       { id: 'out', type: 'audio_out', x: 1470, y: 280, params: { level: 0 } },
     ],
     wires: [
-      wire('prog', 'chords', 'ctx', 'chords'), wire('prog', 'key', 'ctx', 'key'), wire('prog', 'chords', 'lead', 'chords'),
+      wire('key', 'scale', 'prog', 'key'), wire('key', 'scale', 'ctx', 'key'), wire('prog', 'chords', 'ctx', 'chords'),
       wire('pads', 'audio', 'mix', 'a'), wire('bass', 'audio', 'mix', 'b'), wire('lead', 'audio', 'mix', 'c'), wire('drums', 'audio', 'mix', 'd'),
       wire('mix', 'audio', 'verb', 'audio'), wire('verb', 'audio', 'out', 'audio'),
     ],
@@ -164,7 +172,7 @@ export function fullSong() {
         {
           id: 's3', name: 'B', bars: 16, bpm: null,
           overrides: {
-            prog: { key: 'Ab major' },
+            key: keyParams('Ab major'),
             'drums/k': { pattern: 'X..xX...X..xX.x.' },
             'drums/s': { pattern: '....X..x....X.xx' },
             'drums/h': { pattern: 'xxxxxxxXxxxxxxxX' },

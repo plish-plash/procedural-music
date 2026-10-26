@@ -121,6 +121,8 @@ pub fn export(engine: &Engine, bars: u32) -> Vec<u8> {
             }
             Sink::Instrument if kind == "drum_synth" => (9, None),
             Sink::Instrument => (take_channel(), None),
+            // Control streams aren't written to the file.
+            Sink::Control { .. } => continue,
         };
         let mut track = Track::new(&part_name(engine, &part.node));
         if let Some(p) = program {

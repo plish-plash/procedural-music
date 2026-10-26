@@ -26,6 +26,19 @@ export async function midiPorts() {
   return post('/api/midi_ports');
 }
 
+/** MIDI input ports, for following an external clock (none outside the app). */
+export async function midiInPorts() {
+  if (tauri) return tauri.invoke('midi_in_ports');
+  return [];
+}
+
+/** Follows MIDI clock from an input port, or stops with `null`. */
+export async function setClockIn(port) {
+  if (tauri) return tauri.invoke('set_clock_in', { port: port || null });
+  if (port) throw new Error('MIDI input needs the desktop app');
+  return null;
+}
+
 /** Saves text to `path`, or asks where if `path` is null. Resolves to the path, or null if cancelled. */
 export async function saveProject(contents, path) {
   if (tauri) return tauri.invoke('save_project', { contents, path: path ?? null });

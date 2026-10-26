@@ -281,13 +281,13 @@ mod tests {
 
     #[test]
     fn groups_flatten_into_one_graph() {
-        // Scale → [group: (in) → Arp → (out)] → MIDI out, with a pattern inside the group.
+        // Scale → [group: (in) → Degree sequencer → (out)] → MIDI out, with a pattern inside the group.
         let doc = parse(
             r#"{"nodes":[
               {"id":"s","type":"scale","params":{"root":"D"}},
               {"id":"g","type":"group","title":"Lead","graph":{
                  "inputs":[{"name":"key","type":"scale"}],"outputs":[{"name":"notes","type":"notes"}],
-                 "nodes":[{"id":"p","type":"pattern","params":{"pattern":"x","step":"1/4"}},{"id":"a","type":"arp","params":{}}],
+                 "nodes":[{"id":"p","type":"pattern","params":{"pattern":"x","step":"1/4"}},{"id":"a","type":"sequencer","params":{"degrees":"1 2 3 4"}}],
                  "wires":[{"from":{"node":"@in","port":"key"},"to":{"node":"a","port":"scale"}},
                           {"from":{"node":"p","port":"rhythm"},"to":{"node":"a","port":"rhythm"}},
                           {"from":{"node":"a","port":"notes"},"to":{"node":"@out","port":"notes"}}]}},

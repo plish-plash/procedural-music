@@ -15,12 +15,14 @@
 // automatable parameter gets an input port named `param.<name>` that a Control can drive.
 
 import { el, svg } from './dom.js';
+import { keyParams } from './templates.js';
 import { renderCurve, renderKeys, renderPlain, renderRoll, renderStaff, renderSteps, renderTheory, showPlayhead } from './views.js';
 
 export { el, svg };
 
 const WIDE = new Set(['progression', 'voice', 'voice_lead', 'drop', 'invert', 'play_chords', 'transpose', 'chord',
-  'switch_notes', 'switch_rhythm', 'switch_chord', 'switch_scale', 'tonnetz', 'interval_matrix']);
+  'switch_notes', 'switch_rhythm', 'switch_chord', 'switch_scale', 'tonnetz', 'interval_matrix',
+  'chord_degree', 'extend', 'substitute', 'borrow', 'secondary_dominant', 'spread', 'close_open']);
 const XWIDE = new Set(['counterpoint', 'piano_roll']);
 const IN = '@in';
 const OUT = '@out';
@@ -31,6 +33,16 @@ const CLIPBOARD_FORMAT = 'procedural-music/nodes@1';
 const TYPE_COLOR = { scale: '#40d2be', chord: '#f5b446', rhythm: '#ff7aa8', notes: '#6e96ff', audio: '#b8e06a', control: '#b48cff', any: '#8a93a3' };
 // Output types that can be auditioned with a click.
 const AUDIBLE = new Set(['scale', 'chord', 'rhythm']);
+// The pitch-set picker's keys, and how note names map back to pitch classes.
+const PC_LABELS = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
+const BLACK_PCS = new Set([1, 3, 6, 8, 10]);
+function pcOfName(name) {
+  const m = /^([A-Ga-g])([#b♯♭]*)$/.exec(name.trim());
+  if (!m) return null;
+  const natural = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 }[m[1].toLowerCase()];
+  const shift = [...m[2]].reduce((s, c) => s + (c === '#' || c === '♯' ? 1 : -1), 0);
+  return (((natural + shift) % 12) + 12) % 12;
+}
 
 /** An empty group graph. */
 export function emptyGraph() {
@@ -70,11 +82,64 @@ function normalizeGraph(g) {
   };
 }
 
+/**
+ * Brings a graph saved by an older version up to date (in place, recursing into groups):
+ * a Progression's key was a text setting with a Key output, and is now a Scale node wired
+ * into its Key input; the Arpeggiator's input was a scale and is now chords. Records each
+ * moved key as [old flat id, new flat id] in `moves`, for section overrides.
+ */
+function migrateGraph(g, prefix, moves) {
+  if (!g?.nodes) return;
+  const wires = g.wires ?? (g.wires = []);
+  const added = [];
+  const taken = (id) => g.nodes.some((m) => m.id === id) || added.some((m) => m.id === id);
+  for (const n of g.nodes) {
+    if (n.type === 'group') migrateGraph(n.graph, `${prefix}${n.id}/`, moves);
+    if (n.type === 'arp') {
+      for (const w of wires) if (w.to.node === n.id && w.to.port === 'scale') w.to.port = 'chords';
+    }
+    if (n.type === 'progression' && typeof n.params?.key === 'string') {
+      const text = n.params.key.trim();
+      delete n.params.key;
+      const keyOut = wires.filter((w) => w.from.node === n.id && w.from.port === 'key');
+      if (!text) {
+        for (const w of keyOut) wires.splice(wires.indexOf(w), 1);
+        continue;
+      }
+      let id = `${n.id}-key`;
+      while (taken(id)) id += '_';
+      added.push({ id, type: 'scale', x: n.x ?? 0, y: (n.y ?? 0) - 220, params: keyParams(text) });
+      for (const w of keyOut) w.from = { node: id, port: 'scale' };
+      wires.push({ from: { node: id, port: 'scale' }, to: { node: n.id, port: 'key' } });
+      moves.push([prefix + n.id, prefix + id]);
+    }
+  }
+  g.nodes.push(...added);
+}
+
+function migrateDoc(doc) {
+  const out = structuredClone(doc ?? {});
+  const moves = [];
+  migrateGraph(out, '', moves);
+  for (const s of out.arrangement?.sections ?? []) {
+    const over = s.overrides ?? {};
+    for (const [from, to] of moves) {
+      if (typeof over[from]?.key !== 'string') continue;
+      over[to] = { ...(over[to] ?? {}), ...keyParams(over[from].key) };
+      delete over[from].key;
+      if (!Object.keys(over[from]).length) delete over[from];
+    }
+  }
+  return out;
+}
+
 export function normalizeDoc(doc) {
+  doc = migrateDoc(doc);
   return {
     version: 2,
     bpm: doc.bpm ?? 110,
     ...(doc.clockPort ? { clockPort: doc.clockPort } : {}),
+    ...(doc.clockInPort ? { clockInPort: doc.clockInPort } : {}),
     // A project-wide random lock: every playback uses this seed.
     ...(doc.random?.lock ? { random: { lock: true, seed: Number(doc.random.seed) || 0 } } : {}),
     nodes: normalizeNodes(doc.nodes),
@@ -649,7 +714,7 @@ export class Editor {
   previewPinned(n, spec = this.specFor(n)) {
     if (!spec || n.type === 'group' || n.type === IN || n.type === OUT) return false;
     if (typeof n.pins?.preview === 'boolean') return n.pins.preview;
-    if (n.type === 'counterpoint' || spec.category === 'Analysis') return true;
+    if (n.type === 'counterpoint' || n.type === 'progression' || spec.category === 'Analysis') return true;
     return spec.outputs.length > 0 && spec.inputs.length === 0;
   }
 
@@ -1070,7 +1135,13 @@ export class Editor {
       case 'choice': {
         const select = el('select', {}, ...p.options.map((o) => el('option', { value: o }, o)));
         select.value = value;
-        select.addEventListener('change', () => set(select.value));
+        // Other settings may show or hide with this one (a Custom scale's notes).
+        const controlsOthers = this.specFor(t.owner)?.params.some((q) => q.when?.param === p.name
+          || (p.name === 'root' && q.kind === 'pitchset'));
+        select.addEventListener('change', () => {
+          set(select.value);
+          if (controlsOthers) this.inspector?.render();
+        });
         control = select;
         update = (v) => { select.value = v; };
         break;
@@ -1081,6 +1152,32 @@ export class Editor {
         box.addEventListener('change', () => set(box.checked));
         control = box;
         update = (v) => { box.checked = !!v; };
+        break;
+      }
+      case 'pitchset': {
+        // One octave of toggles; the value is the chosen note names ("C D Eb G A"). The
+        // node's root is always in the set, so its key stays on.
+        const pcsOf = (text) => new Set(String(text).split(/[\s,]+/).map(pcOfName).filter((pc) => pc != null));
+        let pcs = pcsOf(value);
+        const rootSpec = this.specFor(t.owner)?.params.find((q) => q.name === 'root');
+        const root = rootSpec ? pcOfName(String(this.paramValue(t.owner, t.flat, 'root', rootSpec.default).value)) : null;
+        const keys = PC_LABELS.map((name, pc) => el('button', {
+          class: `pc-key${BLACK_PCS.has(pc) ? ' black' : ''}${pc === root ? ' root' : ''}`,
+          title: pc === root ? `${name} (the root, always included)` : name,
+          disabled: pc === root ? '' : null,
+          onclick: (e) => {
+            e.preventDefault();
+            if (pc === root) return;
+            if (pcs.has(pc)) pcs.delete(pc);
+            else pcs.add(pc);
+            show();
+            set([...pcs].sort((a, b) => a - b).map((x) => PC_LABELS[x]).join(' '));
+          },
+        }, name));
+        const show = () => keys.forEach((k, pc) => k.classList.toggle('on', pcs.has(pc) || pc === root));
+        show();
+        control = el('div', { class: 'pc-set' }, ...keys);
+        update = (v) => { pcs = pcsOf(v); show(); };
         break;
       }
       case 'midi_port': {

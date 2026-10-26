@@ -157,6 +157,8 @@ pub struct SinkOutput {
     pub module: u64,
     pub sink: Sink,
     pub notes: Vec<Note>,
+    /// For control sinks: the control's value at the start of the window.
+    pub control: Option<f64>,
 }
 
 /// A node's stable id in the audio rack: a hash of its node id, so sound state and
@@ -547,6 +549,10 @@ impl Graph {
                         module: module_id(&node.id),
                         sink,
                         notes: inputs.notes(0).to_vec(),
+                        control: match inputs.values.first() {
+                            Some(Some(Value::Control(c))) => Some(c.at(ctx.start)),
+                            _ => None,
+                        },
                     });
                 }
                 continue;
@@ -756,6 +762,16 @@ impl Graph {
                         )
                     }
                     Sink::Instrument => describe_notes(&out.notes, meter),
+                    Sink::Control { port, channel, message } => {
+                        let port = if port.is_empty() { "Default port" } else { port };
+                        let what = match message {
+                            nodes::ControlMessage::Cc(cc) => format!("CC {cc}"),
+                            nodes::ControlMessage::PitchBend => "pitch bend".into(),
+                            nodes::ControlMessage::Pressure => "channel pressure".into(),
+                        };
+                        let value = out.control.map_or(String::new(), |v| format!(" = {}", (v * 100.0).round() / 100.0));
+                        format!("{port} · ch {} · {what}{value}", channel + 1)
+                    }
                 }
             } else if let Some(v) = eval.outputs[i].iter().flatten().next() {
                 describe(v, meter)
@@ -1080,6 +1096,7 @@ pub(crate) mod tests {
     pub(crate) fn patch_two() -> GraphDoc {
         GraphDoc {
             nodes: vec![
+                node("key", "scale", &[]),
                 node("prog", "progression", &[("chords", text("I vi IV V"))]),
                 node("voice", "voice", &[]),
                 node("lead", "voice_lead", &[]),
@@ -1087,6 +1104,7 @@ pub(crate) mod tests {
                 node("out", "midi_out", &[]),
             ],
             wires: vec![
+                wire("key", "scale", "prog", "key"),
                 wire("prog", "chords", "voice", "chords"),
                 wire("voice", "chords", "lead", "chords"),
                 wire("lead", "chords", "play", "chords"),
@@ -1157,7 +1175,7 @@ pub(crate) mod tests {
             preview("prog")
         );
         assert!(preview("lead").lines().count() == 4);
-        assert_eq!(preview("lonely"), "connect scale");
+        assert_eq!(preview("lonely"), "connect chords");
         assert!(
             preview("out").starts_with("Default port · ch 1\n16 notes in bars 1–4"),
             "{}",
@@ -1224,17 +1242,19 @@ pub(crate) mod tests {
     fn harmonic_context_feeds_unwired_inputs() {
         let doc = GraphDoc {
             nodes: vec![
+                node("k", "scale", &[]),
                 node("p", "progression", &[("chords", text("I IV"))]),
                 node("ctx", "context", &[]),
                 node("root", "chord_root", &[]),
                 node("x", "chord", &[("symbol", text("Dm"))]),
                 node("pc", "play_chords", &[]),
                 node("sw", "switch_chord", &[]),
-                node("arp", "arp", &[]),
+                node("seq", "sequencer", &[("degrees", text("1 2 3"))]),
             ],
             wires: vec![
+                wire("k", "scale", "p", "key"),
                 wire("p", "chords", "ctx", "chords"),
-                wire("p", "key", "ctx", "key"),
+                wire("k", "scale", "ctx", "key"),
                 wire("x", "chord", "pc", "chords"),
             ],
             ..Default::default()
@@ -1244,12 +1264,12 @@ pub(crate) mod tests {
         let r = g.report(Meter::COMMON, 2, true);
         let fed: Vec<(&str, &str)> = r.context.iter().map(|(n, p)| (n.as_str(), p.as_str())).collect();
         // Unwired chord and scale inputs read it; a wire wins; switches don't.
-        assert_eq!(fed, [("root", "chords"), ("arp", "scale")]);
+        assert_eq!(fed, [("root", "chords"), ("seq", "scale")]);
         let preview = |id: &str| r.previews.iter().find(|p| p.0 == id).map(|p| p.1.clone()).unwrap_or_default();
         // One held root per chord (no rhythm wired): C, then F.
         assert!(preview("root").starts_with("2 notes in bars 1–2\nC2"), "{}", preview("root"));
         assert!(preview("pc").contains("D4"), "{}", preview("pc"));
-        assert!(preview("arp").contains("C4 D4 E4"), "the key, not the chord: {}", preview("arp"));
+        assert!(preview("seq").contains("C4 D4 E4"), "the key, not the chord: {}", preview("seq"));
 
         // A node that feeds the context doesn't read it (no loop), and a second context is ignored.
         let doc = GraphDoc {

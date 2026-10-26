@@ -7,6 +7,7 @@ use super::{default_pulse, gate, onsets_between, scale_velocity, Inputs, NodeImp
 use crate::graph::EvalContext;
 use crate::rng;
 use crate::spec::{optional, port, NodeSpec, ParamKind, ParamSpec, Params, PortType};
+use crate::timeline::Timeline;
 use crate::value::Value;
 
 const GATE: ParamSpec = ParamSpec {
@@ -58,10 +59,11 @@ pub static ARP: NodeSpec = NodeSpec {
     kind: "arp",
     title: "Arpeggiator",
     category: "Melody",
-    help: "Plays the notes of a scale (or a chord's tones) one per rhythm hit. \
-           The pattern restarts whenever the scale or chord changes. With no rhythm, it plays sixteenths. \
-           Lock and Seed apply to the Random pattern.",
-    inputs: &[port("scale", PortType::Scale), optional("rhythm", PortType::Rhythm)],
+    help: "Plays each chord's tones one per rhythm hit, from its root in the chosen octave and up \
+           through Octaves. The pattern restarts whenever the chord changes. With no rhythm, it plays \
+           sixteenths. Lock and Seed apply to the Random pattern. To run up and down a scale, use \
+           the Degree sequencer.",
+    inputs: &[port("chords", PortType::Chord), optional("rhythm", PortType::Rhythm)],
     outputs: &[port("notes", PortType::Notes)],
     params: &[
         ParamSpec {
@@ -87,13 +89,17 @@ pub fn build_arp(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     let gate_pct = p.number("gate");
     let vel = p.number("velocity");
     node(move |ins, ctx| {
-        let Some(scales) = ins.scale(0) else {
+        let Some(chords) = ins.chord(0) else {
             return Ok(vec![None]);
         };
+        // Each chord's tones as a scale from its root (a "chord scale").
+        let scales = chords.map(|c| c.to_scale());
         let mut out = Vec::new();
         each_onset(ins, 1, ctx, |t, onset, rhythm| {
             let seg = scales.at(t);
-            let scale = seg.value;
+            let Some(scale) = seg.value else {
+                return;
+            };
             let total = scale.len() * range + 1; // include the top root
             if scale.is_empty() {
                 return;
@@ -259,6 +265,318 @@ pub fn build_random_walk(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
         });
         notes(out)
     })
+}
+
+/// Parses degrees such as "1 3 2 -2" (1-based, negative below the root) to 0-based
+/// numbers; '-' and '|' are skipped.
+fn parse_degrees(text: &str) -> Result<Vec<i32>, String> {
+    let mut out = Vec::new();
+    for token in text.split_whitespace() {
+        if token == "-" || token == "|" {
+            continue;
+        }
+        let d: i32 = token.parse().map_err(|_| format!("'{token}' is not a degree number"))?;
+        if d == 0 {
+            return Err("degrees count from 1; there is no degree 0".into());
+        }
+        out.push(if d > 0 { d - 1 } else { d });
+    }
+    Ok(out)
+}
+
+/// A note's degree in the scale counted from the root of `octave` (0 is that root), after
+/// snapping it into the scale.
+fn degree_in(scale: &Scale, pitch: Pitch, octave: i32) -> Option<i32> {
+    if scale.tuning() != pitch.tuning() || scale.is_empty() {
+        return None;
+    }
+    let (idx, oct) = scale.degree_of(scale.quantize(pitch, pm_theory::Rounding::Nearest))?;
+    Some(idx as i32 + scale.len() as i32 * (oct - octave))
+}
+
+// ---- Markov ----------------------------------------------------------------------
+
+pub static MARKOV: NodeSpec = NodeSpec {
+    kind: "markov",
+    title: "Markov",
+    category: "Melody",
+    help: "Learns which scale degree tends to follow which from a training melody (typed as degrees, or \
+           the notes wired into Train, from the first Learn bars), then improvises new phrases in that \
+           style, one note per rhythm hit. Order 2 looks at the last two notes, so it copies longer \
+           figures. Fresh on every pass unless Lock is on.",
+    inputs: &[port("scale", PortType::Scale), optional("rhythm", PortType::Rhythm), optional("train", PortType::Notes)],
+    outputs: &[port("notes", PortType::Notes)],
+    params: &[
+        ParamSpec { name: "degrees", label: "Training", kind: ParamKind::Text { default: "1 2 3 1 3 4 5 5 6 5 4 3 2 1" } },
+        ParamSpec { name: "learn", label: "Learn bars", kind: ParamKind::Number { min: 1.0, max: 32.0, step: 1.0, default: 4.0 } },
+        ParamSpec { name: "order", label: "Order", kind: ParamKind::Number { min: 1.0, max: 2.0, step: 1.0, default: 1.0 } },
+        ParamSpec { name: "octave", label: "Octave", kind: ParamKind::Number { min: 0.0, max: 8.0, step: 1.0, default: 4.0 } },
+        ParamSpec { name: "phrase", label: "Phrase bars", kind: ParamKind::Number { min: 1.0, max: 16.0, step: 1.0, default: 2.0 } },
+        ParamSpec { name: "lock", label: "Lock", kind: ParamKind::Bool { default: false } },
+        ParamSpec { name: "seed", label: "Seed", kind: ParamKind::Number { min: 0.0, max: 9999.0, step: 1.0, default: 1.0 } },
+        GATE,
+        VELOCITY,
+    ],
+};
+
+/// Transitions learned from a sequence of degrees: for each context of `order` degrees (or
+/// one, as a fallback), the degrees that followed it, with repeats for frequency. The
+/// sequence is treated as a loop, so every context has a follower.
+struct Chain {
+    start: i32,
+    order: usize,
+    next: std::collections::HashMap<Vec<i32>, Vec<i32>>,
+}
+
+impl Chain {
+    fn learn(seq: &[i32], order: usize) -> Option<Chain> {
+        let n = seq.len();
+        if n == 0 {
+            return None;
+        }
+        let mut next: std::collections::HashMap<Vec<i32>, Vec<i32>> = std::collections::HashMap::new();
+        for i in 0..n {
+            for k in 1..=order.min(n) {
+                let context: Vec<i32> = (0..k).map(|j| seq[(i + n - k + j) % n]).collect();
+                next.entry(context).or_default().push(seq[i]);
+            }
+        }
+        Some(Chain { start: seq[0], order, next })
+    }
+
+    /// The `k`-th note of a phrase (0 is the start), walking the chain with `seed`.
+    fn walk(&self, seed: u64, k: u64) -> i32 {
+        let mut history = vec![self.start];
+        for i in 1..=k {
+            let follow = (1..=self.order.min(history.len()))
+                .rev()
+                .find_map(|len| self.next.get(&history[history.len() - len..]));
+            let d = match follow {
+                Some(options) => options[rng::below(rng::hash(&[seed, i]), options.len() as u64) as usize],
+                None => self.start,
+            };
+            history.push(d);
+            if history.len() > self.order {
+                history.remove(0);
+            }
+        }
+        *history.last().expect("non-empty")
+    }
+}
+
+struct MarkovNode {
+    typed: Vec<i32>,
+    learn_bars: u32,
+    order: usize,
+    octave: i32,
+    phrase_bars: u32,
+    lock: bool,
+    seed: u64,
+    gate_pct: f64,
+    vel: f64,
+}
+
+impl NodeImpl for MarkovNode {
+    fn input_window(&self, ctx: &EvalContext) -> Option<(Ticks, Ticks)> {
+        // Only Train needs it; scales and rhythms are the same over any window.
+        Some((0, ctx.meter.ticks_per_bar() * self.learn_bars))
+    }
+
+    fn eval(&self, ins: &Inputs, ctx: &EvalContext) -> Result<Vec<Option<Value>>, String> {
+        let Some(scales) = ins.scale(0) else {
+            return Ok(vec![None]);
+        };
+        let wired: Vec<i32> = {
+            let mut train = ins.notes(2).to_vec();
+            train.sort_by_key(|n| (n.start, std::cmp::Reverse(n.pitch)));
+            train.dedup_by_key(|n| n.start); // the top note of a chord
+            train.iter().filter_map(|n| degree_in(scales.at(n.start).value, n.pitch, self.octave)).collect()
+        };
+        let seq = if wired.is_empty() { &self.typed } else { &wired };
+        let chain = Chain::learn(seq, self.order).ok_or("enter some training degrees, like 1 2 3 1")?;
+        let phrase = ctx.meter.ticks_per_bar() * self.phrase_bars;
+        let stream = rng::stream(self.lock, self.seed, ctx.salt);
+        let mut out = Vec::new();
+        // The pulse lives here so it outlives the onsets borrowed from it.
+        let pulse = default_pulse();
+        let rhythm = ins.rhythm(1).unwrap_or(&pulse);
+        // Inputs came over the learning window; play the real one.
+        rhythm.for_each_in(ctx.start, ctx.end, |t, onset| {
+            let origin = t - t % phrase;
+            let k = onsets_between(rhythm, origin, t);
+            let d = chain.walk(rng::hash(&[stream, (t / phrase) as u64]), k);
+            out.push(Note {
+                start: t,
+                duration: gate(onset.duration, self.gate_pct),
+                pitch: scales.at(t).value.pitch(d, self.octave),
+                velocity: scale_velocity(onset.velocity, self.vel),
+                voice: 0,
+            });
+        });
+        notes(out)
+    }
+}
+
+pub fn build_markov(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
+    let typed = parse_degrees(&p.text("degrees"))?;
+    Ok(Box::new(MarkovNode {
+        typed,
+        learn_bars: p.int("learn").max(1) as u32,
+        order: p.int("order").clamp(1, 2) as usize,
+        octave: p.int("octave"),
+        phrase_bars: p.int("phrase").max(1) as u32,
+        lock: p.flag("lock"),
+        seed: p.number("seed") as u64,
+        gate_pct: p.number("gate"),
+        vel: p.number("velocity"),
+    }))
+}
+
+// ---- Contour -----------------------------------------------------------------------
+
+pub static CONTOUR: NodeSpec = NodeSpec {
+    kind: "contour",
+    title: "Contour",
+    category: "Melody",
+    help: "A melody that follows a shape over each phrase (rising, falling, an arch…), one note per \
+           rhythm hit, spanning Range scale degrees up from the root.",
+    inputs: &[port("scale", PortType::Scale), optional("rhythm", PortType::Rhythm)],
+    outputs: &[port("notes", PortType::Notes)],
+    params: &[
+        ParamSpec {
+            name: "shape",
+            label: "Shape",
+            kind: ParamKind::Choice { options: &["Arch", "Rise", "Fall", "Valley", "Wave"], default: "Arch" },
+        },
+        ParamSpec { name: "range", label: "Range", kind: ParamKind::Number { min: 1.0, max: 21.0, step: 1.0, default: 7.0 } },
+        ParamSpec { name: "phrase", label: "Phrase bars", kind: ParamKind::Number { min: 1.0, max: 16.0, step: 1.0, default: 2.0 } },
+        ParamSpec { name: "octave", label: "Octave", kind: ParamKind::Number { min: 0.0, max: 8.0, step: 1.0, default: 4.0 } },
+        GATE,
+        VELOCITY,
+    ],
+};
+
+/// The height (0 to 1) of a contour shape at `x` (0 to 1) through the phrase.
+fn contour_at(shape: &str, x: f64) -> f64 {
+    use std::f64::consts::PI;
+    match shape {
+        "Rise" => x,
+        "Fall" => 1.0 - x,
+        "Valley" => 1.0 - (PI * x).sin(),
+        "Wave" => 0.5 - 0.5 * (4.0 * PI * x).cos(),
+        _ => (PI * x).sin(),
+    }
+}
+
+pub fn build_contour(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
+    let shape = p.text("shape");
+    let range = p.number("range");
+    let phrase_bars = p.int("phrase").max(1) as u32;
+    let octave = p.int("octave");
+    let gate_pct = p.number("gate");
+    let vel = p.number("velocity");
+    node(move |ins, ctx| {
+        let Some(scales) = ins.scale(0) else {
+            return Ok(vec![None]);
+        };
+        let phrase = ctx.meter.ticks_per_bar() * phrase_bars;
+        let mut out = Vec::new();
+        each_onset(ins, 1, ctx, |t, onset, _| {
+            // The shape at the onset's place in the phrase.
+            let x = (t % phrase) as f64 / phrase as f64;
+            let d = (contour_at(&shape, x) * range).round() as i32;
+            out.push(Note {
+                start: t,
+                duration: gate(onset.duration, gate_pct),
+                pitch: scales.at(t).value.pitch(d, octave),
+                velocity: scale_velocity(onset.velocity, vel),
+                voice: 0,
+            });
+        });
+        notes(out)
+    })
+}
+
+// ---- Motif transform -------------------------------------------------------------------
+
+pub static MOTIF: NodeSpec = NodeSpec {
+    kind: "motif",
+    title: "Motif transform",
+    category: "Melody",
+    help: "Transforms the notes of each phrase: Retrograde plays it backwards, Inversion turns it \
+           upside down around its first note (in the key), Augmentation stretches its first half to \
+           twice the length, Diminution squeezes it into half and plays it twice.",
+    inputs: &[port("notes", PortType::Notes), port("key", PortType::Scale)],
+    outputs: &[port("notes", PortType::Notes)],
+    params: &[
+        ParamSpec {
+            name: "op",
+            label: "Transform",
+            kind: ParamKind::Choice {
+                options: &["Retrograde", "Inversion", "Augmentation", "Diminution"],
+                default: "Retrograde",
+            },
+        },
+        ParamSpec { name: "phrase", label: "Phrase bars", kind: ParamKind::Number { min: 1.0, max: 16.0, step: 1.0, default: 1.0 } },
+    ],
+};
+
+/// Each phrase's notes transformed by `op`; `key` (when there is one) keeps inversions diatonic.
+fn transform_motif(op: &str, input: &[Note], key: Option<&Timeline<Scale>>, phrase: Ticks) -> Vec<Note> {
+    let mut by_phrase: std::collections::BTreeMap<Ticks, Vec<Note>> = std::collections::BTreeMap::new();
+    for n in input {
+        by_phrase.entry(n.start / phrase * phrase).or_default().push(*n);
+    }
+    let mut out = Vec::new();
+    for (b, mut notes) in by_phrase {
+        notes.sort_by_key(|n| (n.start, n.pitch));
+        match op {
+            "Inversion" => {
+                let first = notes[0].pitch;
+                for n in &notes {
+                    let pitch = match key.map(|k| k.at(n.start).value) {
+                        Some(k) if k.tuning() == n.pitch.tuning() && !k.is_empty() => {
+                            let (d0, d) = (degree_in(k, first, 0).unwrap_or(0), degree_in(k, n.pitch, 0).unwrap_or(0));
+                            k.pitch(2 * d0 - d, 0)
+                        }
+                        _ => first.offset(first.step() - n.pitch.step()),
+                    };
+                    out.push(Note { pitch, ..*n });
+                }
+            }
+            "Augmentation" => {
+                for n in notes.iter().filter(|n| n.start - b < phrase / 2) {
+                    out.push(Note { start: b + 2 * (n.start - b), duration: n.duration * 2, ..*n });
+                }
+            }
+            "Diminution" => {
+                for half in [0, phrase / 2] {
+                    for n in &notes {
+                        out.push(Note { start: b + half + (n.start - b) / 2, duration: (n.duration / 2).max(1), ..*n });
+                    }
+                }
+            }
+            _ => {
+                for n in &notes {
+                    let end = (n.start + n.duration).min(b + phrase);
+                    out.push(Note { start: b + (b + phrase - end), ..*n });
+                }
+            }
+        }
+    }
+    out
+}
+
+pub fn build_motif(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
+    let op = p.text("op");
+    let bars = p.int("phrase").max(1) as Ticks;
+    super::note_ops::windowed(
+        move |ctx| {
+            let phrase = bars * ctx.meter.ticks_per_bar();
+            (ctx.start / phrase * phrase, ctx.end.saturating_sub(1) / phrase * phrase + phrase)
+        },
+        move |ins, ctx| Ok(transform_motif(&op, ins.notes(0), ins.scale(1), bars * ctx.meter.ticks_per_bar())),
+    )
 }
 
 // ---- Play chords -----------------------------------------------------------------
@@ -512,16 +830,61 @@ mod tests {
         )))
     }
 
+    fn line(pitches: &[&str], step: Ticks) -> Option<Value> {
+        Some(Value::Notes(
+            pitches
+                .iter()
+                .enumerate()
+                .map(|(i, p)| Note { start: i as Ticks * step, duration: step, pitch: Pitch::parse(p).unwrap(), velocity: 90, voice: 0 })
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn markov_follows_its_training() {
+        // A strict alternation can only ever alternate.
+        let p = [("degrees", ParamValue::Text("1 5 1 5".into())), ("lock", ParamValue::Bool(true))];
+        let v = run("markov", &p, vec![c_major(), None, None], &ctx(0, 4 * PPQ, 0));
+        assert_eq!(names(&v)[..4], ["C4", "G4", "C4", "G4"]);
+        // Wired training wins over the typed degrees.
+        let v = run("markov", &p, vec![c_major(), None, line(&["E4", "F4", "E4", "F4"], PPQ)], &ctx(0, PPQ, 0));
+        assert_eq!(names(&v)[..2], ["E4", "F4"]);
+        // Unlocked, passes differ; locked, they repeat.
+        let free = [("degrees", ParamValue::Text("1 2 3 4 5 4 3 2 1 3 5 2 4".into()))];
+        let a = run("markov", &free, vec![c_major(), None, None], &ctx(0, 4 * PPQ, 1));
+        let b = run("markov", &free, vec![c_major(), None, None], &ctx(0, 4 * PPQ, 2));
+        assert_ne!(names(&a), names(&b));
+    }
+
+    #[test]
+    fn contour_rises() {
+        let v = run("contour", &[("shape", ParamValue::Text("Rise".into()))], vec![c_major(), None], &ctx(0, 8 * PPQ, 0));
+        assert_eq!(v.first().map(|n| n.pitch.to_string()).as_deref(), Some("C4"));
+        assert!(v.windows(2).all(|w| w[0].pitch <= w[1].pitch));
+        assert!(v.last().unwrap().pitch >= Pitch::parse("A4").unwrap());
+    }
+
+    #[test]
+    fn motif_transforms() {
+        let motif = line(&["C4", "D4", "E4", "G4"], PPQ);
+        let bar = 4 * PPQ;
+        let retro = run("motif", &[], vec![motif.clone(), c_major()], &ctx(0, bar, 0));
+        assert_eq!(names(&retro), ["G4", "E4", "D4", "C4"]);
+        let inv = run("motif", &[("op", ParamValue::Text("Inversion".into()))], vec![motif.clone(), c_major()], &ctx(0, bar, 0));
+        assert_eq!(names(&inv), ["C4", "B3", "A3", "F3"]);
+        let aug = run("motif", &[("op", ParamValue::Text("Augmentation".into()))], vec![motif.clone(), c_major()], &ctx(0, bar, 0));
+        assert_eq!(aug.iter().map(|n| (n.start, n.duration)).collect::<Vec<_>>(), [(0, 2 * PPQ), (2 * PPQ, 2 * PPQ)]);
+        let dim = run("motif", &[("op", ParamValue::Text("Diminution".into()))], vec![motif, c_major()], &ctx(0, bar, 0));
+        assert_eq!(dim.len(), 8);
+        assert_eq!(dim[4].start, 2 * PPQ);
+    }
+
     #[test]
     fn arp_up_down_over_a_bar() {
         let v = run(
             "arp",
             &[("pattern", ParamValue::Text("Up-down".into()))],
-            vec![
-                Value::Chord(Timeline::constant(Chord::from_symbol("C", 4).unwrap()))
-                    .convert(PortType::Scale),
-                None,
-            ],
+            vec![Some(Value::Chord(Timeline::constant(Chord::from_symbol("C", 4).unwrap()))), None],
             &ctx(0, PPQ * 2, 0),
         );
         assert_eq!(names(&v), ["C4", "E4", "G4", "C5", "G4", "E4", "C4", "E4"]);
@@ -550,7 +913,8 @@ mod tests {
         let arp = |params: &[(&str, ParamValue)], salt| {
             let mut all = vec![("pattern", ParamValue::Text("Random".into()))];
             all.extend(params.iter().cloned());
-            names(&run("arp", &all, vec![c_major(), None], &ctx(0, bar, salt)))
+            let cmaj9 = Some(Value::Chord(Timeline::constant(Chord::from_symbol("Cmaj9", 4).unwrap())));
+            names(&run("arp", &all, vec![cmaj9, None], &ctx(0, bar, salt)))
         };
         assert_ne!(arp(&[], 1), arp(&[], 2), "fresh on each pass");
         let locked = [("lock", ParamValue::Bool(true))];

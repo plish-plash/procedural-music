@@ -109,7 +109,12 @@ export class Inspector {
           ? 'Plays the same on every playback. 🎲 picks another seed.'
           : 'Plays something new on every pass. Lock it to keep what it is playing now.')));
     }
-    const settings = spec.params.filter((p) => !(ed.isRandom(n, spec) && (p.name === 'lock' || p.name === 'seed')));
+    const shown = (p) => {
+      if (!p.when) return true;
+      const other = spec.params.find((q) => q.name === p.when.param);
+      return p.when.values.includes(ed.paramValue(n, ed.flat(n.id), p.when.param, other?.default).value);
+    };
+    const settings = spec.params.filter((p) => shown(p) && !(ed.isRandom(n, spec) && (p.name === 'lock' || p.name === 'seed')));
     if (settings.length) {
       const pinned = new Set(ed.pinnedParams(n, spec).map((p) => p.name));
       const rows = settings.map((p) => {

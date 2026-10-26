@@ -157,8 +157,9 @@ async function load(doc, path = null, isDirty = false) {
   $('bpm').value = bpm;
   await api.call('set_bpm', { bpm });
   $('clock-port').value = doc.clockPort ?? '';
-  showClock();
   await api.call('set_clock_ports', { ports: doc.clockPort ? [doc.clockPort] : [] });
+  await followClock(doc.clockInPort ?? '');
+  showClock();
   timeline.focus = null;
   timeline.setSectionEdit(false);
   timeline.setLoop(mode === 'perform' ? 'section' : 'song');
@@ -176,11 +177,21 @@ function confirmDiscard() {
 async function refreshPorts() {
   try {
     const ports = await api.midiPorts();
+    midiPorts = ports;
     editor.setMidiPorts(ports);
     const clock = $('clock-port');
     const current = editor.doc.clockPort ?? '';
     clock.replaceChildren(new Option('Off', ''), ...ports.map((p) => new Option(p, p)));
     clock.value = ports.includes(current) ? current : '';
+    const inputs = await api.midiInPorts();
+    const clockIn = $('clock-in-port');
+    const following = editor.doc.clockInPort ?? '';
+    clockIn.replaceChildren(new Option('Off', ''), ...inputs.map((p) => new Option(p, p)));
+    clockIn.value = inputs.includes(following) ? following : '';
+    clockIn.disabled = !inputs.length;
+    clockIn.title = inputs.length ? '' : (api.inApp ? 'No MIDI input ports found' : 'MIDI input needs the desktop app');
+    showLatency();
+    await sendLatency();
     showClock();
     setStatus(ports.length ? `MIDI ports: ${ports.join(', ')}` : 'No MIDI output ports found', ports.length > 0);
   } catch (e) {
@@ -188,11 +199,67 @@ async function refreshPorts() {
   }
 }
 
-/** Marks the MIDI menu button while clock out is on. */
+/** Marks the MIDI menu button while clock out or clock in is on. */
 function showClock() {
-  const port = $('clock-port').value;
-  $('btn-midi').classList.toggle('on', !!port);
-  $('btn-midi').title = port ? `MIDI clock out: ${port}` : 'MIDI clock and ports';
+  const out = $('clock-port').value;
+  const input = $('clock-in-port').value;
+  $('btn-midi').classList.toggle('on', !!(out || input));
+  const parts = [out && `clock out: ${out}`, input && `following clock from ${input}`].filter(Boolean);
+  $('btn-midi').title = parts.length ? `MIDI ${parts.join('; ')}` : 'MIDI clock, latency and ports';
+}
+
+/** Follows MIDI clock from an input port ('' for none). */
+async function followClock(port) {
+  try {
+    await api.setClockIn(port || null);
+    $('clock-in-port').value = port;
+  } catch (e) {
+    $('clock-in-port').value = '';
+    if (port) setStatus(`Couldn't follow clock from ${port}: ${e.message ?? e}`);
+  }
+}
+
+// Latency offsets belong to this computer's MIDI setup, not to a song, so they are kept in
+// local storage rather than the project.
+const LATENCY_KEY = 'pm.midiLatency';
+let midiPorts = [];
+
+function savedLatency() {
+  try {
+    return JSON.parse(localStorage.getItem(LATENCY_KEY) ?? '{}') ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/** Sends the offsets to the engine; the default port ('') uses the first port's. */
+async function sendLatency() {
+  const latency = { ...savedLatency() };
+  if (midiPorts.length && latency[midiPorts[0]] != null) latency[''] = latency[midiPorts[0]];
+  await api.call('set_midi_latency', { latency });
+}
+
+/** One number box per output port in the MIDI menu. */
+function showLatency() {
+  const saved = savedLatency();
+  const rows = midiPorts.map((port) => {
+    const box = el('input', { type: 'number', min: -100, max: 250, step: 1, value: saved[port] ?? 0 });
+    box.addEventListener('change', async () => {
+      const ms = Math.max(-100, Math.min(250, Math.round(Number(box.value) || 0)));
+      box.value = ms;
+      const all = savedLatency();
+      if (ms) all[port] = ms;
+      else delete all[port];
+      try {
+        localStorage.setItem(LATENCY_KEY, JSON.stringify(all));
+      } catch {
+        /* storage unavailable: applies until the app closes */
+      }
+      await sendLatency();
+    });
+    return el('label', { class: 'menu-field latency', title: port }, el('span', {}, port), box);
+  });
+  $('midi-latency').replaceChildren(...(rows.length ? rows : [el('div', { class: 'menu-empty' }, 'No MIDI output ports')]));
 }
 
 async function refreshLibrary() {
@@ -327,6 +394,20 @@ function showRandom(s) {
     ? 'Randomness is locked: every playback is the same. Click to make each Play fresh.'
     : 'Random nodes play something new on every Play. Click to lock the whole song as it is now.';
 }
+/** While following MIDI clock, the BPM box shows the clock's tempo and can't be edited. */
+function showClockTempo(s) {
+  const box = $('bpm');
+  if (s.clockIn) {
+    box.disabled = true;
+    box.title = 'Following MIDI clock';
+    if (s.clockBpm != null) box.value = Math.round(s.clockBpm * 10) / 10;
+  } else if (box.disabled) {
+    box.disabled = false;
+    box.title = '';
+    box.value = editor.doc.bpm ?? 110;
+  }
+}
+
 async function pollStatus() {
   if (polling) return;
   polling = true;
@@ -340,6 +421,7 @@ async function pollStatus() {
     $('section-name').textContent = sec ? sec.name : '';
     $('section-name').hidden = !sec;
     $('position').title = s.tempo !== s.bpm ? `Tempo now ${s.tempo} bpm` : '';
+    showClockTempo(s);
     // Previews show what's playing, so their playheads move whenever something plays.
     editor.setPlayhead(s.playing ? s.tick : null);
     timeline.setStatus(s);
@@ -611,6 +693,13 @@ async function init() {
     showClock();
     onChange({ graph: false });
     await api.call('set_clock_ports', { ports: port ? [port] : [] });
+  });
+  $('clock-in-port').addEventListener('change', async () => {
+    const port = $('clock-in-port').value;
+    await followClock(port);
+    editor.doc.clockInPort = $('clock-in-port').value || undefined;
+    showClock();
+    onChange({ graph: false });
   });
 
   document.addEventListener('keydown', (e) => {

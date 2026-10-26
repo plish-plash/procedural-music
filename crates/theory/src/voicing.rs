@@ -174,6 +174,72 @@ pub fn lead(prev: &Chord, target: &Chord, low: Pitch, high: Pitch) -> Chord {
     }
 }
 
+/// Close position over the bass: the bass stays, and the chord's other pitch classes are
+/// packed into the octave above it.
+pub fn close_over_bass(chord: &Chord) -> Chord {
+    let Some(bass) = chord.bass() else {
+        return *chord;
+    };
+    let mut out = Chord::empty(chord.tuning());
+    let _ = out.add(bass);
+    for pc in chord.pitch_classes().iter() {
+        if pc != bass.pitch_class() {
+            let _ = out.add(first_at_or_above(bass.offset(1), pc).with_spelling(spelling_for(chord, pc)));
+        }
+    }
+    with_root_of(out, chord)
+}
+
+/// Open position: close position over the bass, then every other note above the bass (the
+/// first, third…) up an octave, so C E G becomes C G E.
+pub fn open(chord: &Chord) -> Chord {
+    let closed = close_over_bass(chord);
+    let octave = chord.tuning().steps_per_octave();
+    let mut out = Chord::empty(chord.tuning());
+    for (i, &p) in closed.notes().iter().enumerate() {
+        let _ = out.add(if i % 2 == 1 { p.offset(octave).with_spelling(p.spelling()) } else { p });
+    }
+    with_root_of(out, chord)
+}
+
+/// Keeps the bass and spreads the other notes evenly over `span` steps above it, each placed
+/// in the octave nearest its share of the span and above the note before.
+pub fn spread(chord: &Chord, span: i32) -> Chord {
+    let closed = close_over_bass(chord);
+    let notes = closed.notes();
+    if notes.len() < 3 {
+        return closed;
+    }
+    let octave = chord.tuning().steps_per_octave();
+    let bass = notes[0];
+    let mut out = Chord::empty(chord.tuning());
+    let _ = out.add(bass);
+    let mut prev = bass;
+    let last = (notes.len() - 1) as i32;
+    for (i, &p) in notes.iter().enumerate().skip(1) {
+        let target = bass.step() + span * i as i32 / last;
+        // The pitch of p's class nearest the target, then above the previous note.
+        let mut step = target - (target - p.step()).rem_euclid(octave);
+        if target - step > octave / 2 {
+            step += octave;
+        }
+        while step <= prev.step() {
+            step += octave;
+        }
+        let placed = Pitch::new(chord.tuning(), step).with_spelling(p.spelling());
+        let _ = out.add(placed);
+        prev = placed;
+    }
+    with_root_of(out, chord)
+}
+
+fn with_root_of(out: Chord, chord: &Chord) -> Chord {
+    match chord.root() {
+        Some(r) => out.with_root(r),
+        None => out,
+    }
+}
+
 fn collect(iter: impl Iterator<Item = u8>) -> FixedVec<u8, 64> {
     let mut v = FixedVec::new();
     for x in iter {
@@ -232,6 +298,21 @@ mod tests {
         assert_eq!(format!("{:#}", drop2(&c)), "[G3 C4 E4 B4]");
         assert_eq!(format!("{:#}", drop3(&c)), "[E3 C4 G4 B4]");
         assert_eq!(drop2(&c).to_string(), "Cmaj7/G");
+    }
+
+    #[test]
+    fn close_open_and_spread() {
+        let wide = Chord::from_pitches(&[
+            Pitch::parse("C3").unwrap(),
+            Pitch::parse("G4").unwrap(),
+            Pitch::parse("E5").unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(format!("{:#}", close_over_bass(&wide)), "[C3 E3 G3]");
+        assert_eq!(format!("{:#}", open(&wide)), "[C3 G3 E4]");
+        let s = spread(&sym("Cmaj7"), 24);
+        assert_eq!(format!("{s:#}"), "[C4 E4 G5 B5]");
+        assert_eq!(s.pitch_classes(), sym("Cmaj7").pitch_classes());
     }
 
     #[test]

@@ -12,7 +12,7 @@
 //! (starting at 0), with its own parameter overrides and tempo.
 
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use pm_synth::{AudioMsg, ModuleKind, NoteEvent, RackDesc, TimedEvent, TimedSet};
 use pm_theory::{Meter, Note, Ticks, PPQ};
@@ -22,7 +22,7 @@ use crate::graph::{
     describe, section_key, value_view, CompileReport, EvalContext, Graph, GraphDoc, SinkOutput,
 };
 use crate::json::Json;
-use crate::nodes::Sink;
+use crate::nodes::{ControlMessage, Sink};
 use crate::rng;
 use crate::value::Value;
 
@@ -93,6 +93,23 @@ impl Ord for Pending {
             .then_with(|| other.seq.cmp(&self.seq))
     }
 }
+
+/// The state of an incoming MIDI clock being followed.
+#[derive(Default)]
+struct ClockIn {
+    /// When the last clock pulse arrived.
+    last: Option<f64>,
+    /// Recent gaps between pulses, in seconds (a beat's worth at most).
+    gaps: VecDeque<f64>,
+    /// Pulses since Start or Continue.
+    count: u64,
+    /// The tempo the pulses imply, once a few have arrived.
+    bpm: Option<f64>,
+}
+
+/// Delay between a transport event and the first notes it schedules, so they are not
+/// already late (Play and clock pulses use the same).
+const START_DELAY: f64 = 0.05;
 
 /// What the editor's previews evaluate (see [`Engine::preview_target`]).
 struct PreviewTarget {
@@ -292,6 +309,13 @@ pub struct Engine {
     /// don't cut each other off.
     active: HashMap<(String, u8, u8), u32>,
     clock_ports: Vec<String>,
+    /// Seconds to shift messages for each port by (to line external synths up).
+    latency: HashMap<String, f64>,
+    /// The last control message sent for each (port, channel, kind), so unchanged values
+    /// aren't sent again.
+    controls_sent: HashMap<(String, u8, ControlMessage), Vec<u8>>,
+    /// Following incoming MIDI clock: its tempo and transport drive playback.
+    clock_in: Option<ClockIn>,
     /// What unlocked random nodes mix in: new for each Play (unless the project is
     /// locked), kept after Stop so previews still show what was heard.
     salt: u64,
@@ -350,6 +374,9 @@ impl Engine {
             seq: 0,
             active: HashMap::new(),
             clock_ports: Vec::new(),
+            latency: HashMap::new(),
+            controls_sent: HashMap::new(),
+            clock_in: None,
             salt: 0,
             salt_played: false,
             random_locked: false,
@@ -640,6 +667,97 @@ impl Engine {
         &self.clock_ports
     }
 
+    /// Latency offsets in milliseconds per port name: that port's messages go out this much
+    /// later (or earlier, if negative, within the lookahead). The default port is "".
+    pub fn set_midi_latency(&mut self, ms: Vec<(String, f64)>) {
+        self.latency = ms
+            .into_iter()
+            .filter(|(_, ms)| ms.is_finite() && *ms != 0.0)
+            .map(|(port, ms)| (port, ms.clamp(-500.0, 500.0) / 1000.0))
+            .collect();
+    }
+
+    /// Starts or stops following incoming MIDI clock (the caller passes its messages to
+    /// [`Engine::clock_message`]).
+    pub fn set_clock_follow(&mut self, on: bool) {
+        self.clock_in = on.then(ClockIn::default);
+    }
+
+    pub fn following_clock(&self) -> bool {
+        self.clock_in.is_some()
+    }
+
+    /// The tempo of the clock being followed, once known.
+    pub fn clock_bpm(&self) -> Option<f64> {
+        self.clock_in.as_ref().and_then(|c| c.bpm)
+    }
+
+    /// One real-time message from the followed clock: Start (from the top), Continue
+    /// (from the cursor), Stop, or a clock pulse (24 per quarter note). Returns messages
+    /// to send now (note-offs when stopping). `fresh` is as for [`Engine::play`].
+    pub fn clock_message(&mut self, now: f64, byte: u8, fresh: u64) -> Vec<MidiMessage> {
+        if self.clock_in.is_none() {
+            return Vec::new();
+        }
+        match byte {
+            0xfa | 0xfb => {
+                let out = self.stop();
+                if byte == 0xfa {
+                    self.cursor = 0;
+                }
+                if let Some(c) = self.clock_in.as_mut() {
+                    c.count = 0;
+                    c.last = None;
+                }
+                self.play(now, fresh);
+                out
+            }
+            0xfc => self.stop(),
+            0xf8 => {
+                self.clock_pulse(now);
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Measures the tempo, and on every beat re-anchors the tempo map so that beat lands
+    /// with the incoming clock (keeping playback in phase, not just in tempo).
+    fn clock_pulse(&mut self, now: f64) {
+        let Some(c) = self.clock_in.as_mut() else {
+            return;
+        };
+        if let Some(last) = c.last {
+            let gap = now - last;
+            // Ignore gaps from a paused or restarted clock.
+            if gap > 0.0 && gap < 0.25 {
+                c.gaps.push_back(gap);
+                if c.gaps.len() > 24 {
+                    c.gaps.pop_front();
+                }
+            }
+        }
+        c.last = Some(now);
+        if c.gaps.len() >= 6 {
+            let mean = c.gaps.iter().sum::<f64>() / c.gaps.len() as f64;
+            c.bpm = Some((60.0 / (24.0 * mean)).clamp(20.0, 400.0));
+        }
+        let pulse = c.count;
+        c.count += 1;
+        let bpm = c.bpm;
+        if !self.playing || pulse % 24 != 0 {
+            return;
+        }
+        let current = self.tempo.last().map_or(self.bpm, |t| t.bpm);
+        let bpm = bpm.unwrap_or(current);
+        let tick = (pulse / 24) as f64 * PPQ as f64;
+        self.tempo.retain(|t| t.tick < tick);
+        self.tempo.push(TempoPoint { tick, time: now + START_DELAY, bpm });
+        if (bpm - current).abs() > 0.5 {
+            self.audio.push(AudioMsg::Tempo(bpm));
+        }
+    }
+
     fn tempo_at_time(&self, now: f64) -> Option<&TempoPoint> {
         let i = self.tempo.partition_point(|t| t.time <= now);
         self.tempo.get(i.saturating_sub(1))
@@ -818,17 +936,18 @@ impl Engine {
         self.scheduled_until = 0;
         self.end_at = None;
         self.cue = None;
+        self.controls_sent.clear();
         self.transport = self.make_transport(self.cursor, 0);
         let first = self.song.locate(self.transport.from);
-        let bpm = self.section_bpm(first);
+        let bpm = self.clock_bpm().unwrap_or_else(|| self.section_bpm(first));
         // A small delay so the first notes are not already late.
         self.tempo = vec![TempoPoint {
             tick: 0.0,
-            time: now + 0.05,
+            time: now + START_DELAY,
             bpm,
         }];
         self.audio.push(AudioMsg::Tempo(bpm));
-        let start_time = now + 0.05;
+        let start_time = now + START_DELAY;
         for (port, channel, program) in self.song.base().programs() {
             self.push(
                 now,
@@ -893,6 +1012,11 @@ impl Engine {
     }
 
     fn push(&mut self, at: f64, event: Event) {
+        let port = match &event {
+            Event::Raw(m) => &m.port,
+            Event::Off { port, .. } | Event::On { port, .. } => port,
+        };
+        let at = at + self.latency.get(port).copied().unwrap_or(0.0);
         self.seq += 1;
         self.queue.push(Pending {
             at,
@@ -976,9 +1100,9 @@ impl Engine {
             }
             None => (0, s, 0, 0, self.bpm),
         };
-        // Tempo and sound changes at section boundaries.
+        // Tempo and sound changes at section boundaries (unless an incoming clock sets the tempo).
         let current = self.tempo_at_tick(p as f64).map_or(self.bpm, |t| t.bpm);
-        if (current - bpm).abs() > 1e-9 {
+        if (current - bpm).abs() > 1e-9 && self.clock_in.is_none() {
             let time = self.time_of(p);
             self.tempo.retain(|t| t.tick < p as f64);
             self.tempo.push(TempoPoint {
@@ -1010,7 +1134,7 @@ impl Engine {
             for n in &mut sink.notes {
                 n.start = p + (n.start - local);
             }
-            self.queue_sink(sink);
+            self.queue_sink(sink, at);
         }
         let pulse = PPQ / 24;
         let mut t = p.div_ceil(pulse) * pulse;
@@ -1075,9 +1199,22 @@ impl Engine {
         Ok(end - start)
     }
 
-    fn queue_sink(&mut self, sink: SinkOutput) {
+    /// Queues a sink's output from a window starting at time `at` (seconds).
+    fn queue_sink(&mut self, sink: SinkOutput, at: f64) {
         let (port, channel) = match sink.sink {
             Sink::Midi { port, channel } => (port, channel & 0x0f),
+            Sink::Control { port, channel, message } => {
+                // Sent when the value changes.
+                if let Some(value) = sink.control {
+                    let bytes = message.bytes(channel, value);
+                    let key = (port.clone(), channel, message);
+                    if self.controls_sent.get(&key) != Some(&bytes) {
+                        self.controls_sent.insert(key, bytes.clone());
+                        self.push(at, Event::Raw(MidiMessage { port, bytes }));
+                    }
+                }
+                return;
+            }
             Sink::Instrument => {
                 for note in sink.notes {
                     let (on, off) = (self.time_of(note.start), self.time_of(note.end()));
@@ -1486,6 +1623,71 @@ mod tests {
         assert_eq!(pulses, 24, "one beat at 120 bpm lasts 0.5 s");
         assert!(sent[..start].iter().any(|(_, b)| b == &vec![0xf2, 0, 0]));
         assert!(e.stop().iter().any(|m| m.bytes == vec![0xfc]));
+    }
+
+    #[test]
+    fn latency_shifts_a_port() {
+        let first_note = |latency: f64| {
+            let mut e = Engine::new();
+            e.set_graph(&doc("drum", &[]));
+            e.set_midi_latency(vec![(DEFAULT_PORT.into(), latency)]);
+            e.set_bpm(0.0, 120.0);
+            e.play(0.0, 1);
+            run(&mut e, 0.3).into_iter().find(|(_, b)| b[0] & 0xf0 == 0x90).expect("a note").0
+        };
+        let plain = first_note(0.0);
+        assert!((first_note(100.0) - plain - 0.1).abs() < 0.002);
+        assert!((plain - first_note(-30.0) - 0.03).abs() < 0.002);
+    }
+
+    #[test]
+    fn control_changes_are_sent_when_they_change() {
+        let n = |id: &str, kind: &str, params: &[(&str, ParamValue)]| NodeDoc {
+            id: id.into(),
+            kind: kind.into(),
+            params: params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        };
+        let doc = GraphDoc {
+            nodes: vec![
+                // 0 to 127 and back over a bar, as steps of 0, 64 and 127 a beat each.
+                n("s", "steps", &[("values", ParamValue::Text("0 64 127 127".into())), ("step", ParamValue::Text("1/4".into()))]),
+                n("cc", "midi_cc", &[("cc", ParamValue::Number(1.0)), ("channel", ParamValue::Number(2.0))]),
+            ],
+            wires: vec![WireDoc { from_node: "s".into(), from_port: "control".into(), to_node: "cc".into(), to_port: "value".into() }],
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        let report = e.set_graph(&doc);
+        assert!(report.issues.is_empty(), "{:?}", report.issues);
+        e.set_bpm(0.0, 120.0);
+        e.play(0.0, 1);
+        let sent: Vec<Vec<u8>> = run(&mut e, 2.2).into_iter().map(|(_, b)| b).filter(|b| b[0] == 0xb1).collect();
+        assert_eq!(sent, [vec![0xb1, 1, 0], vec![0xb1, 1, 64], vec![0xb1, 1, 127], vec![0xb1, 1, 0]]);
+    }
+
+    #[test]
+    fn follows_incoming_clock() {
+        let mut e = Engine::new();
+        e.set_bpm(0.0, 90.0);
+        e.set_clock_follow(true);
+        // Start, then pulses at 150 bpm (1/60 s apart).
+        e.clock_message(1.0, 0xfa, 7);
+        assert!(e.is_playing());
+        let gap = 60.0 / (150.0 * 24.0);
+        for i in 0..48 {
+            e.clock_message(1.0 + i as f64 * gap, 0xf8, 0);
+        }
+        assert!((e.clock_bpm().unwrap() - 150.0).abs() < 0.01);
+        // Beat 2 (pulse 24) was re-anchored: the playhead is a beat in a beat after it.
+        let beat2 = 1.0 + 24.0 * gap + START_DELAY;
+        assert!((e.playhead(beat2) - PPQ as f64).abs() < 1.0);
+        assert!((e.playhead(beat2 + 0.4) - 2.0 * PPQ as f64).abs() < 1.0);
+        e.clock_message(2.0, 0xfc, 0);
+        assert!(!e.is_playing());
+        // Not following: clock messages do nothing.
+        e.set_clock_follow(false);
+        e.clock_message(3.0, 0xfa, 0);
+        assert!(!e.is_playing());
     }
 
     use crate::graph::SectionDoc;

@@ -15,7 +15,8 @@ pub struct Onset {
     pub duration: Ticks,
     /// 1 to 127.
     pub velocity: u8,
-    /// Chance the onset plays, 0 to 100. Evaluated by the graph, not here.
+    /// Chance the onset plays, 0 to 100. Each pass of the loop rolls again, from the
+    /// rhythm's chance seed and the onset's absolute time (see [`Rhythm::for_each_in`]).
     pub probability: u8,
 }
 
@@ -44,6 +45,8 @@ pub struct Rhythm {
     /// Display grid hint: the step size the rhythm was built on.
     grid: Ticks,
     onsets: FixedVec<Onset, MAX_ONSETS>,
+    /// Picks which onsets with a probability under 100 play on each pass.
+    chance_seed: u64,
 }
 
 impl Rhythm {
@@ -54,7 +57,64 @@ impl Rhythm {
             length,
             grid: length,
             onsets: FixedVec::new(),
+            chance_seed: 0,
         }
+    }
+
+    /// The same rhythm with another display grid.
+    pub fn with_grid(mut self, grid: Ticks) -> Rhythm {
+        self.grid = grid.max(1);
+        self
+    }
+
+    /// Every onset given `percent` chance of playing (accents keep theirs when
+    /// `keep_accents`), with `seed` choosing which play on each pass.
+    pub fn with_chance(&self, percent: u8, keep_accents: bool, seed: u64) -> Rhythm {
+        let mut out = *self;
+        for o in out.onsets.iter_mut() {
+            if !(keep_accents && o.velocity >= Onset::ACCENT) {
+                o.probability = (o.probability as u32 * percent.min(100) as u32 / 100) as u8;
+            }
+        }
+        out.chance_seed = seed;
+        out
+    }
+
+    /// Every onset's velocity replaced by `f(onset)`.
+    pub fn with_velocities(&self, mut f: impl FnMut(&Onset) -> u8) -> Rhythm {
+        let mut out = *self;
+        for o in out.onsets.iter_mut() {
+            o.velocity = f(o).clamp(1, 127);
+        }
+        out
+    }
+
+    /// Whether the onset starting at absolute time `t` plays on this pass.
+    pub fn plays(&self, t: Ticks, onset: &Onset) -> bool {
+        onset.probability >= 100 || (chance_roll(self.chance_seed, t) % 100) < onset.probability as u64
+    }
+
+    /// Each onset split into `n` equal hits (ratchets). `None` if that is more than
+    /// [`MAX_ONSETS`] hits.
+    pub fn subdivide(&self, n: u32) -> Option<Rhythm> {
+        let n = n.max(1);
+        let mut out = Rhythm {
+            onsets: FixedVec::new(),
+            ..*self
+        };
+        for o in self.onsets.iter() {
+            let each = (o.duration / n).max(1);
+            for k in 0..n {
+                out.add(Onset {
+                    offset: o.offset + k * each,
+                    duration: each,
+                    ..*o
+                })
+                .ok()?;
+            }
+        }
+        out.grid = (self.grid / n).max(1);
+        Some(out)
     }
 
     /// Parses a step grid, one character per step of `step` ticks:
@@ -250,8 +310,8 @@ impl Rhythm {
         out
     }
 
-    /// Calls `f(absolute_time, onset)` for every onset starting in `[start, end)`,
-    /// treating the rhythm as looping forever from time 0.
+    /// Calls `f(absolute_time, onset)` for every onset starting in `[start, end)` that
+    /// plays (see [`Rhythm::plays`]), treating the rhythm as looping forever from time 0.
     pub fn for_each_in(&self, start: Ticks, end: Ticks, mut f: impl FnMut(Ticks, &Onset)) {
         if start >= end || self.onsets.is_empty() {
             return;
@@ -267,7 +327,7 @@ impl Rhythm {
                 if t >= end {
                     break;
                 }
-                if t >= start {
+                if t >= start && self.plays(t, o) {
                     f(t, o);
                 }
             }
@@ -319,6 +379,14 @@ impl fmt::Display for Rhythm {
         }
         Ok(())
     }
+}
+
+/// A well-mixed number from a seed and a time (SplitMix64).
+fn chance_roll(seed: u64, t: Ticks) -> u64 {
+    let mut x = seed ^ (t as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    x ^ (x >> 31)
 }
 
 fn gcd(a: Ticks, b: Ticks) -> Ticks {
@@ -376,6 +444,31 @@ mod tests {
         let swung = eighths.swing(PPQ / 2, 67);
         let offsets: std::vec::Vec<_> = swung.onsets().iter().map(|o| o.offset).collect();
         assert_eq!(offsets, [0, 643, 960, 1603]);
+    }
+
+    #[test]
+    fn chance_and_ratchets() {
+        let r = Rhythm::from_grid("xxxxxxxxxxxxxxxX", SIXTEENTH).unwrap();
+        let count = |r: &Rhythm| {
+            let mut n = 0;
+            r.for_each_in(0, 100 * r.length(), |_, _| n += 1);
+            n
+        };
+        assert_eq!(count(&r.with_chance(100, false, 7)), 1600);
+        // Only the accent survives 0%.
+        assert_eq!(count(&r.with_chance(0, true, 7)), 100);
+        let half = count(&r.with_chance(50, false, 7));
+        assert!((700..900).contains(&half), "{half}");
+        // The same seed picks the same hits; another seed others.
+        assert_eq!(half, count(&r.with_chance(50, false, 7)));
+        let mut a = std::vec::Vec::new();
+        let mut b = std::vec::Vec::new();
+        r.with_chance(50, false, 7).for_each_in(0, 3840, |t, _| a.push(t));
+        r.with_chance(50, false, 8).for_each_in(0, 3840, |t, _| b.push(t));
+        assert_ne!(a, b);
+
+        let s = Rhythm::from_grid("x_..x...", SIXTEENTH).unwrap().subdivide(2).unwrap();
+        assert_eq!(format!("{s}"), "x_x_....xx......");
     }
 
     #[test]

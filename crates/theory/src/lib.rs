@@ -14,6 +14,7 @@
 
 mod chord;
 mod fixed;
+pub mod harmony;
 mod note;
 mod pcset;
 mod pitch;

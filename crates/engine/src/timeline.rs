@@ -137,6 +137,35 @@ impl<T> Timeline<T> {
         }
     }
 
+    /// Combines two timelines step by step: a new step starts wherever either one changes.
+    /// The result loops over both lengths together, or over this one's length when that
+    /// would be very long (the other one is then cut at each loop).
+    pub fn zip_with<U, V>(&self, other: &Timeline<U>, mut f: impl FnMut(&T, &U) -> V) -> Timeline<V> {
+        let (a, b) = (self.length(), other.length());
+        if b == 0 {
+            return self.map(|v| f(v, &other.steps[0].1));
+        }
+        if a == 0 {
+            return other.map(|u| f(&self.steps[0].1, u));
+        }
+        let together = a / gcd(a, b) * b;
+        let length = if together <= 16 * a.max(b) { together } else { a };
+        let mut cuts: Vec<Ticks> = self
+            .starts_in(0, length, 0)
+            .iter()
+            .map(|s| s.start)
+            .chain(other.starts_in(0, length, 0).iter().map(|s| s.start))
+            .collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        cuts.push(length);
+        let steps = cuts
+            .windows(2)
+            .map(|w| (w[1] - w[0], f(self.at(w[0]).value, other.at(w[0]).value)))
+            .collect();
+        Timeline { steps }
+    }
+
     /// Applies `f(previous_output, value)` in order; used for voice leading.
     pub fn map_with_previous<U: Clone>(
         &self,
@@ -151,9 +180,28 @@ impl<T> Timeline<T> {
     }
 }
 
+fn gcd(a: Ticks, b: Ticks) -> Ticks {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zips_two_timelines() {
+        let a = Timeline::from_steps(vec![(100, 'a'), (100, 'b')]).unwrap();
+        let b = Timeline::from_steps(vec![(50, 1), (250, 2)]).unwrap();
+        let z = a.zip_with(&b, |x, y| (*x, *y));
+        assert_eq!(z.length(), 600);
+        assert_eq!(z.steps()[..3], [(50, ('a', 1)), (50, ('a', 2)), (100, ('b', 2))]);
+        let c = a.zip_with(&Timeline::constant(7), |x, y| (*x, *y));
+        assert_eq!(c.steps(), &[(100, ('a', 7)), (100, ('b', 7))]);
+    }
 
     #[test]
     fn lookup_and_loop() {

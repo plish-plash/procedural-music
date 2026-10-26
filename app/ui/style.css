@@ -125,6 +125,12 @@ input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(
 .menu-sub:hover > .submenu { display: block; }
 .menu-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 10px; }
 .menu-field select { max-width: 220px; }
+.menu-heading { padding: 4px 10px 2px; font-size: 11px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.06em; }
+.menu-field.latency { padding: 3px 10px; font-size: 12.5px; }
+.menu-field.latency span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-field.latency input { width: 64px; flex: none; }
+.menu-empty { padding: 3px 10px; font-size: 12px; color: var(--text-3); }
+#bpm:disabled { color: #bff2d8; opacity: 1; }
 
 /* ---- Canvas and inspector --------------------------------------------- */
 
@@ -257,6 +263,13 @@ body.perform .head-buttons.rand .mini { font-size: 15px; padding: 2px 8px; }
 .param .slider output { font-family: var(--mono); font-size: 12px; text-align: right; color: var(--text); }
 .param input[type=range] { width: 100%; accent-color: var(--cat); }
 .param input[type=checkbox] { justify-self: start; accent-color: var(--cat); width: 16px; height: 16px; }
+.pc-set { display: grid; grid-template-columns: repeat(6, 1fr); gap: 2px; }
+.pc-key { padding: 2px 0; font: 11px var(--mono); border-radius: 4px; background: #d9dee7; color: #1a1f28; border-color: #12161d; }
+.pc-key.black { background: #1c212b; color: #c9d1de; }
+.pc-key:hover { background: #c4cad6; }
+.pc-key.black:hover { background: #2a303c; }
+.pc-key.on, .pc-key.on:hover { background: var(--t-scale); color: #0d1f1c; border-color: color-mix(in srgb, var(--t-scale) 60%, #000); }
+.pc-key.root, .pc-key.root:disabled { background: color-mix(in srgb, var(--t-scale) 50%, #000); color: #e8fffb; opacity: 1; cursor: default; }
 
 .node-preview {
   margin: 0; padding: 6px 10px 8px; border-top: 1px solid var(--line);

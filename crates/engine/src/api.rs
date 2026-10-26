@@ -154,6 +154,18 @@ pub fn handle(
                 ("view", view.unwrap_or(Json::Null)),
             ])))
         }
+        "set_midi_latency" => {
+            // {latency: {port: milliseconds}}; later notes shift by that much.
+            let ms = match args.get("latency") {
+                Some(Json::Obj(fields)) => fields
+                    .iter()
+                    .filter_map(|(port, v)| v.as_f64().map(|ms| (port.clone(), ms)))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            engine.set_midi_latency(ms);
+            Ok(Reply::json(Json::Null))
+        }
         "status" => Ok(Reply::json(status_json(engine, now))),
         "report" => Ok(Reply::json(report_json(&engine.report()))),
         other => Err(format!("unknown command '{other}'")),
@@ -191,6 +203,8 @@ pub fn status_json(engine: &Engine, now: f64) -> Json {
         ),
         ("salt", Json::Num(engine.salt() as f64)),
         ("randomLocked", Json::Bool(engine.random_locked())),
+        ("clockIn", Json::Bool(engine.following_clock())),
+        ("clockBpm", engine.clock_bpm().map_or(Json::Null, Json::Num)),
         ("previewKey", Json::Num(engine.preview_key() as f64)),
         ("bar", Json::Num(bar as f64 + 1.0)),
         ("beat", Json::Num(beat as f64 + 1.0)),
@@ -272,6 +286,19 @@ pub fn specs_json() -> Json {
                         ParamKind::MidiPort => {
                             f.extend([("kind", Json::str("midi_port")), ("default", Json::str(""))])
                         }
+                        ParamKind::PitchSet { default } => f.extend([
+                            ("kind", Json::str("pitchset")),
+                            ("default", Json::str(default)),
+                        ]),
+                    }
+                    if let Some((on, values)) = crate::spec::condition(s.kind, p.name) {
+                        f.push((
+                            "when",
+                            Json::obj(vec![
+                                ("param", Json::str(on)),
+                                ("values", Json::Arr(values.iter().map(|v| Json::str(*v)).collect())),
+                            ]),
+                        ));
                     }
                     Json::obj(f)
                 })
@@ -436,7 +463,7 @@ mod tests {
     fn graph_commands() {
         let doc = r#"{"nodes":[
             {"id":"s","type":"scale","x":10,"y":20,"params":{"root":"D","scale":"Dorian"}},
-            {"id":"a","type":"arp","params":{"pattern":"Up"}},
+            {"id":"a","type":"sequencer","params":{"degrees":"1 2 3"}},
             {"id":"o","type":"midi_out","params":{"channel":2,"mute":false}}],
           "wires":[{"from":{"node":"s","port":"scale"},"to":{"node":"a","port":"scale"}},
                    {"from":{"node":"a","port":"notes"},"to":{"node":"o","port":"notes"}}]}"#;
