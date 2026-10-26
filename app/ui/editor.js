@@ -156,6 +156,7 @@ export class Editor {
     this.sectionEdit = false; // edits go to the focused section
     this.report = null;
     this.rollMode = {}; // node path -> 'roll' | 'staff'
+    this.drawnViews = new WeakMap(); // view element -> what it shows (see fillView)
     this.drag = null;
     this.menu = null;
     this.popup = null;
@@ -1239,8 +1240,11 @@ export class Editor {
       const view = node.querySelector('.node-view');
       if (view) this.fillView(view, n, { text: true });
     }
-    this.lastTick = null;
     this.inspector?.refresh();
+    // Light up redrawn views where the playhead is now, rather than on the next poll.
+    const tick = this.lastTick;
+    this.lastTick = undefined;
+    this.setPlayhead(tick);
   }
 
   /** Problems with a node; for a group, those inside it (with the first one named). */
@@ -1269,6 +1273,11 @@ export class Editor {
     const flat = this.flat(n.id);
     const data = this.report?.views?.[flat];
     const preview = this.report?.previews?.[flat] ?? '';
+    // Reports come often while automation plays; redraw only what changed, so the rest
+    // doesn't flicker.
+    const drawn = JSON.stringify([data ?? null, preview, text, this.rollMode[flat] ?? null]);
+    if (this.drawnViews.get(container) === drawn) return;
+    this.drawnViews.set(container, drawn);
     const parts = data ? this.renderView(flat, data) : text && preview ? [el('pre', { class: 'view-text' }, preview)] : [];
     container.replaceChildren(...parts);
     container.title = data && data.kind !== 'roll' ? preview : '';

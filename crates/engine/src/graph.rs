@@ -645,14 +645,19 @@ impl Graph {
 
     /// Evaluates a preview window as playback would hear it. Without automation that is
     /// one evaluation. With it, the window goes a slice at a time: notes come from every
-    /// slice, other values (scales, chords, rhythms) from the slice holding `focus`.
+    /// slice, other values (scales, chords, rhythms) from the slice holding `focus`. That
+    /// slice goes last, so nodes that keep a view of their latest evaluation show it too.
     fn run_preview(&self, ctx: &EvalContext, focus: Ticks) -> Evaluation {
         if !self.automated {
             return self.run(ctx);
         }
+        let mut starts: Vec<Ticks> = (ctx.start..ctx.end).step_by(PREVIEW_SLICE as usize).collect();
+        if let Some(i) = starts.iter().rposition(|&t| t <= focus) {
+            let here = starts.remove(i);
+            starts.push(here);
+        }
         let mut merged: Option<Evaluation> = None;
-        let mut t = ctx.start;
-        while t < ctx.end {
+        for t in starts {
             let end = (t + PREVIEW_SLICE).min(ctx.end);
             let e = self.run(&EvalContext { start: t, end, ..*ctx });
             let in_slice = |n: &Note| n.start >= t && n.start < end;
@@ -679,16 +684,30 @@ impl Graph {
             }
             for mut sink in e.sinks {
                 sink.notes.retain(in_slice);
+                let (node, control) = (sink.node.clone(), sink.control);
                 merge_sink(&mut m.sinks, sink);
+                if here {
+                    if let Some(s) = m.sinks.iter_mut().find(|s| s.node == node) {
+                        s.control = control;
+                    }
+                }
             }
             for issue in e.issues {
                 if !m.issues.contains(&issue) {
                     m.issues.push(issue);
                 }
             }
-            t = end;
         }
-        merged.unwrap_or_else(|| self.run(ctx))
+        let mut merged = merged.unwrap_or_else(|| self.run(ctx));
+        for v in merged.outputs.iter_mut().flatten().flatten() {
+            if let Value::Notes(n) = v {
+                n.sort_by_key(|n| n.start);
+            }
+        }
+        for s in &mut merged.sinks {
+            s.notes.sort_by_key(|n| n.start);
+        }
+        merged
     }
 
     /// Like [`Graph::evaluate`], plus the settings of rack modules whose parameters are
@@ -1335,6 +1354,36 @@ pub(crate) mod tests {
             r.previews.iter().find(|p| p.0 == "k").unwrap().1,
             "steps 0 5 7"
         );
+    }
+
+    #[test]
+    fn automated_previews_show_the_playhead() {
+        let bar = Meter::COMMON.ticks_per_bar();
+        let doc = GraphDoc {
+            nodes: vec![
+                node("key", "scale", &[]),
+                node("deg", "chord_degree", &[]),
+                node("k", "steps", &[("values", text("1 5 1 6"))]),
+                node("circle", "circle_of_fifths", &[]),
+                node("cc", "midi_cc", &[]),
+            ],
+            wires: vec![
+                wire("key", "scale", "deg", "key"),
+                wire("k", "control", "deg", "param.degree"),
+                wire("deg", "chord", "circle", "chords"),
+                wire("k", "control", "cc", "value"),
+            ],
+            ..Default::default()
+        };
+        let g = Graph::compile(&doc);
+        assert!(g.issues().is_empty(), "{:?}", g.issues());
+        // The playhead in bar 2 (G), not the end of the window (Am, bar 4).
+        let ctx = EvalContext::preview(Meter::COMMON, 4, true, 0, 0);
+        let r = g.report_window(&ctx, bar + PPQ);
+        let circle = view(&r, "circle").to_string();
+        assert!(circle.contains("\"G\"") && !circle.contains("Am"), "{circle}");
+        let cc = &r.previews.iter().find(|p| p.0 == "cc").unwrap().1;
+        assert!(cc.ends_with("= 5"), "{cc}");
     }
 
     #[test]
