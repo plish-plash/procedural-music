@@ -521,7 +521,7 @@ pub static PIANO_ROLL: NodeSpec = NodeSpec {
     kind: "piano_roll",
     title: "Piano roll",
     category: "Analysis",
-    help: "Shows the notes on a wire as a piano roll, coloured by voice. Display only.",
+    help: "Shows the notes on a wire as a piano roll, coloured by voice.",
     inputs: &[port("notes", PortType::Notes)],
     outputs: &[],
     params: &[ParamSpec {

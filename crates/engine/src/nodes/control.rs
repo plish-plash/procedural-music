@@ -1,11 +1,14 @@
 //! Control sources: numbers over time that automate other nodes' parameters (wired into a
 //! pinned parameter's input).
 
+use pm_theory::Rhythm;
+
 use super::theory::node;
-use super::{step_ticks, NodeImpl, STEP_OPTIONS};
+use super::{Inputs, NodeImpl};
 use crate::control::{Control, Shape};
-use crate::spec::{port, NodeSpec, ParamKind, ParamSpec, Params, PortType};
-use crate::timeline::Timeline;
+use crate::graph::EvalContext;
+use crate::rng;
+use crate::spec::{optional, port, NodeSpec, ParamKind, ParamSpec, Params, PortType};
 use crate::value::Value;
 
 /// A value in the units of whatever parameter it drives (so any range).
@@ -41,8 +44,7 @@ pub static LFO: NodeSpec = NodeSpec {
     kind: "lfo",
     title: "LFO",
     category: "Control",
-    help: "A repeating wave between Min and Max, one cycle every so many bars. Wire it into a \
-           pinned parameter; values are in that parameter's units.",
+    help: "A repeating wave between Min and Max, one cycle every so many bars.",
     inputs: &[],
     outputs: CONTROL_OUT,
     params: &[
@@ -92,7 +94,7 @@ pub static RAMP: NodeSpec = NodeSpec {
     title: "Ramp",
     category: "Control",
     help: "Moves in a straight line from one value to another over so many bars, then holds \
-           (or starts again, with Loop). Each section starts it from the beginning.",
+           (or starts again, with Loop).",
     inputs: &[],
     outputs: CONTROL_OUT,
     params: &[
@@ -122,43 +124,82 @@ pub fn build_ramp(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     })
 }
 
+const CLOCK_IN: &[crate::spec::PortSpec] = &[optional("rhythm", PortType::Rhythm)];
+
+/// The rhythm wired in to move a control on, or one hit a bar.
+fn clock(ins: &Inputs, ctx: &EvalContext) -> Box<Rhythm> {
+    Box::new(match ins.rhythm(0) {
+        Some(r) => *r,
+        None => Rhythm::from_grid("x", ctx.meter.ticks_per_bar()).expect("valid grid"),
+    })
+}
+
 pub static STEPS: NodeSpec = NodeSpec {
     kind: "steps",
     title: "Steps",
     category: "Control",
-    help: "A looping sequence of values, each held for one step: \"0 5 7 5\" with a 1/1 step \
-           changes once a bar.",
-    inputs: &[],
+    help: "A looping sequence of values, moving to the next one on each hit of the rhythm \
+           input: \"0 5 7 5\". With no rhythm, it changes once a bar.",
+    inputs: CLOCK_IN,
     outputs: CONTROL_OUT,
-    params: &[
-        ParamSpec {
-            name: "values",
-            label: "Values",
-            kind: ParamKind::Text { default: "0 5 7 5" },
-        },
-        ParamSpec {
-            name: "step",
-            label: "Step",
-            kind: ParamKind::Choice {
-                options: STEP_OPTIONS,
-                default: "1/1",
-            },
-        },
-    ],
+    params: &[ParamSpec {
+        name: "values",
+        label: "Values",
+        kind: ParamKind::Text { default: "0 5 7 5" },
+    }],
 };
 
 pub fn build_steps(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
-    let step = step_ticks(&p.text("step"));
     let values = p
         .text("values")
         .split([' ', ','])
         .filter(|s| !s.is_empty())
         .map(|s| s.parse::<f64>().map_err(|_| format!("'{s}' is not a number")))
         .collect::<Result<Vec<f64>, String>>()?;
+    if values.is_empty() {
+        return Err("enter some values".into());
+    }
     if values.len() > 64 {
         return Err("at most 64 values".into());
     }
-    let timeline = Timeline::from_steps(values.into_iter().map(|v| (step, v)).collect())
-        .ok_or("enter some values")?;
-    node(move |_, _| Ok(vec![Some(Value::Control(Control::Steps(timeline.clone())))]))
+    node(move |ins, ctx| {
+        Ok(vec![Some(Value::Control(Control::Steps {
+            values: values.clone(),
+            clock: clock(ins, ctx),
+        }))])
+    })
+}
+
+pub static RANDOM: NodeSpec = NodeSpec {
+    kind: "random",
+    title: "Random",
+    category: "Control",
+    help: "A new random value between Min and Max on each hit of the rhythm input, held until \
+           the next. With no rhythm, it changes once a bar.",
+    inputs: CLOCK_IN,
+    outputs: CONTROL_OUT,
+    params: &[
+        value("min", "Min", 0.0),
+        value("max", "Max", 12.0),
+        ParamSpec { name: "lock", label: "Lock", kind: ParamKind::Bool { default: false } },
+        ParamSpec {
+            name: "seed",
+            label: "Seed",
+            kind: ParamKind::Number { min: 0.0, max: 9999.0, step: 1.0, default: 1.0 },
+        },
+    ],
+};
+
+pub fn build_random(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
+    let (min, max) = (p.number("min"), p.number("max"));
+    let lock = p.flag("lock");
+    let seed = p.number("seed") as u64;
+    node(move |ins, ctx| {
+        Ok(vec![Some(Value::Control(Control::Random {
+            min,
+            max,
+            seed: rng::hash(&[rng::stream(lock, seed, ctx.salt), 0x7a2d]),
+            clock: clock(ins, ctx),
+        }))])
+    })
 }

@@ -5,9 +5,10 @@
 
 use std::f64::consts::TAU;
 
-use pm_theory::Ticks;
+use pm_theory::{Rhythm, Ticks};
 
-use crate::timeline::Timeline;
+use crate::nodes::onsets_between;
+use crate::rng;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shape {
@@ -57,6 +58,8 @@ impl Shape {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Control {
+    /// The same value throughout.
+    Constant(f64),
     /// A repeating wave between `min` and `max`, one cycle every `cycle` ticks.
     Lfo {
         shape: Shape,
@@ -73,14 +76,28 @@ pub enum Control {
         length: Ticks,
         looped: bool,
     },
-    /// Values held for their durations, looping.
-    Steps(Timeline<f64>),
+    /// Values in turn, moving to the next one on each hit of `clock` (and looping).
+    Steps { values: Vec<f64>, clock: Box<Rhythm> },
+    /// A new random value between `min` and `max` on each hit of `clock`, drawn from `seed`.
+    Random {
+        min: f64,
+        max: f64,
+        seed: u64,
+        clock: Box<Rhythm>,
+    },
+}
+
+/// How many hits of `clock` have passed by tick `t`, counting from 0 at the first
+/// (which also holds before it).
+fn step_at(clock: &Rhythm, t: Ticks) -> u64 {
+    onsets_between(clock, 0, t.saturating_add(1)).saturating_sub(1)
 }
 
 impl Control {
     /// The value at tick `t`.
     pub fn at(&self, t: Ticks) -> f64 {
         match self {
+            Control::Constant(v) => *v,
             Control::Lfo {
                 shape,
                 cycle,
@@ -102,7 +119,18 @@ impl Control {
                 let t = if *looped { t % length } else { t.min(length) };
                 from + (to - from) * t as f64 / length as f64
             }
-            Control::Steps(tl) => *tl.at(t).value,
+            Control::Steps { values, clock } => {
+                values[(step_at(clock, t) % values.len() as u64) as usize]
+            }
+            Control::Random {
+                min,
+                max,
+                seed,
+                clock,
+            } => {
+                let h = rng::hash(&[*seed, step_at(clock, t)]);
+                min + (max - min) * ((h >> 11) as f64 / (1u64 << 53) as f64)
+            }
         }
     }
 }
@@ -123,6 +151,7 @@ impl Control {
             format!("{} bar{}", num(n), if n == 1.0 { "" } else { "s" })
         };
         match self {
+            Control::Constant(v) => num(*v),
             Control::Lfo {
                 shape,
                 cycle,
@@ -148,10 +177,11 @@ impl Control {
                 bars(*length),
                 if *looped { ", repeating" } else { "" }
             ),
-            Control::Steps(tl) => {
-                let values: Vec<String> = tl.values().map(|v| num(*v)).collect();
+            Control::Steps { values, .. } => {
+                let values: Vec<String> = values.iter().map(|v| num(*v)).collect();
                 format!("steps {}", values.join(" "))
             }
+            Control::Random { min, max, .. } => format!("random {}–{}", num(*min), num(*max)),
         }
     }
 }
@@ -202,11 +232,25 @@ mod tests {
 
     #[test]
     fn steps_hold_their_values() {
-        let s = Control::Steps(Timeline::from_steps(vec![(100, 0.0), (100, 5.0)]).unwrap());
+        let clock = || Box::new(Rhythm::from_grid("x", 100).unwrap());
+        let s = Control::Steps { values: vec![0.0, 5.0], clock: clock() };
         assert_eq!(s.at(99), 0.0);
         assert_eq!(s.at(100), 5.0);
         assert_eq!(s.at(250), 0.0);
         assert_eq!(s.describe(400), "steps 0 5");
+        // An uneven clock: the value moves on at each hit, holding the first until then.
+        let uneven = Control::Steps {
+            values: vec![1.0, 2.0, 3.0],
+            clock: Box::new(Rhythm::from_grid(".x.x", 100).unwrap()),
+        };
+        let at: Vec<f64> = [0, 100, 250, 300, 500, 700].iter().map(|&t| uneven.at(t)).collect();
+        assert_eq!(at, [1.0, 1.0, 1.0, 2.0, 3.0, 1.0]);
+
+        let random = Control::Random { min: 2.0, max: 4.0, seed: 7, clock: clock() };
+        let values: Vec<f64> = (0..50).map(|k| random.at(k * 100 + 50)).collect();
+        assert!(values.iter().all(|v| (2.0..4.0).contains(v)), "{values:?}");
+        assert_eq!(random.at(120), random.at(199), "held between hits");
+        assert!(values.windows(2).any(|w| w[0] != w[1]));
         let lfo = Control::Lfo {
             shape: Shape::Sine,
             cycle: 800,

@@ -12,7 +12,7 @@ export const EXAMPLES = [
     name: 'Modal explorer',
     description: 'One scale, seven modes: move the Degree slider while it plays.',
     doc: {
-      version: 1,
+      version: 2,
       bpm: 112,
       nodes: [
         { id: 'n1', type: 'scale', x: 40, y: 40, params: { root: 'D', scale: 'Dorian' } },
@@ -35,7 +35,7 @@ export const EXAMPLES = [
     name: 'Progression to pads',
     description: 'I–vi–IV–V voiced in four parts and voice-led. Disconnect Voice lead to hear the difference.',
     doc: {
-      version: 1,
+      version: 2,
       bpm: 84,
       nodes: [
         { id: 'n0', type: 'scale', x: 40, y: 40, params: { root: 'C', scale: 'Major' } },
@@ -59,7 +59,7 @@ export const EXAMPLES = [
     name: 'Full band',
     description: 'Pads, bass, an arpeggiated lead and drums on the built-in synths, all following one progression.',
     doc: {
-      version: 1,
+      version: 2,
       bpm: 104,
       nodes: [
         { id: 'n0', type: 'scale', x: 40, y: 260, params: { root: 'Eb', scale: 'Major' } },
@@ -109,7 +109,7 @@ export const EXAMPLES = [
     name: 'First species',
     description: "Fux's cantus firmus in D Dorian in the bass; the solver writes the soprano. Try other species, or switch rule groups off.",
     doc: {
-      version: 1,
+      version: 2,
       bpm: 150,
       nodes: [
         { id: 'n1', type: 'scale', x: 40, y: 40, params: { root: 'D', scale: 'Dorian' } },
@@ -134,7 +134,7 @@ export const EXAMPLES = [
     name: 'Chorale',
     description: 'Four voices written over a progression in chorale style: chord tones, smooth lines, no parallels. Hover a note to see why it was chosen.',
     doc: {
-      version: 1,
+      version: 2,
       bpm: 76,
       nodes: [
         { id: 'n1', type: 'scale', x: 40, y: 40, params: { root: 'G', scale: 'Major' } },
@@ -154,7 +154,7 @@ export const EXAMPLES = [
     name: 'Full band (MIDI)',
     description: 'The Full band patch sent to MIDI ports instead, for external synths (or the Windows GS synth).',
     doc: {
-      version: 1,
+      version: 2,
       bpm: 104,
       nodes: [
         { id: 'n0', type: 'scale', x: 40, y: 100, params: { root: 'Eb', scale: 'Major' } },

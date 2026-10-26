@@ -60,9 +60,8 @@ pub static ARP: NodeSpec = NodeSpec {
     title: "Arpeggiator",
     category: "Melody",
     help: "Plays each chord's tones one per rhythm hit, from its root in the chosen octave and up \
-           through Octaves. The pattern restarts whenever the chord changes. With no rhythm, it plays \
-           sixteenths. Lock and Seed apply to the Random pattern. To run up and down a scale, use \
-           the Degree sequencer.",
+           through Octaves. The pattern restarts whenever the chord changes. To run up and down a \
+           scale, use the Degree sequencer.",
     inputs: &[port("chords", PortType::Chord), optional("rhythm", PortType::Rhythm)],
     outputs: &[port("notes", PortType::Notes)],
     params: &[
@@ -202,9 +201,7 @@ pub static RANDOM_WALK: NodeSpec = NodeSpec {
     kind: "random_walk",
     title: "Random walk",
     category: "Melody",
-    help: "A melody that wanders through the scale by small random steps, restarting from the root every phrase. \
-           Fresh on every pass unless Lock is on. Locking keeps what it was just playing, and every playback \
-           is then the same (Reroll or change Seed for another melody).",
+    help: "A melody that wanders through the scale by small random steps, restarting from the root every phrase.",
     inputs: &[port("scale", PortType::Scale), optional("rhythm", PortType::Rhythm)],
     outputs: &[port("notes", PortType::Notes)],
     params: &[
@@ -303,7 +300,7 @@ pub static MARKOV: NodeSpec = NodeSpec {
     help: "Learns which scale degree tends to follow which from a training melody (typed as degrees, or \
            the notes wired into Train, from the first Learn bars), then improvises new phrases in that \
            style, one note per rhythm hit. Order 2 looks at the last two notes, so it copies longer \
-           figures. Fresh on every pass unless Lock is on.",
+           figures.",
     inputs: &[port("scale", PortType::Scale), optional("rhythm", PortType::Rhythm), optional("train", PortType::Notes)],
     outputs: &[port("notes", PortType::Notes)],
     params: &[

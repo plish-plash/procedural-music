@@ -35,7 +35,7 @@ The graph is a pure function of musical time: given a time window, a seed and th
 
 **Randomness.** Generative nodes (Random walk, the Arpeggiator's Random pattern, Counterpoint's Variety, Probability, Humanize, Markov) draw from a stream derived from their seed and the phrase or tick. Unlocked, the stream also mixes in a salt that changes on every Play and differs per section and per repeat, so each pass is new. Locked, a node draws from its seed alone and plays the same every time; locking keeps exactly what was just heard, and "reroll" picks a new seed. A project-wide lock fixes the salt, making the whole piece reproducible, and the project reroll picks a new salt (or a new project seed when locked). Exports use the same salt as playback, so they match what was heard.
 
-**Harmonic context.** A *Harmonic context* node carries the song's key and chord progression, usually fed by a Scale node (the key) and a Progression that reads its numerals in that key. Every Scale or Chord input left unwired anywhere in the project, inside groups too, reads it implicitly (the port shows "(context)"), so a bassline, a pad and a lead all follow the same progression without a wire from one shared source to every part. An explicit wire always overrides the context. Section switches and the nodes that feed the context itself don't read it. Section overrides on the key's Scale node or on the Progression change the context per section, for example a key change in B.
+**Harmonic context.** A *Harmonic context* node carries the song's key and chord progression, usually fed by a Scale node (the key) and a Progression that reads its numerals in that key. Every Scale or Chord input left unwired anywhere in the project, inside groups too, reads it implicitly (the port shows "(context)"), so a bassline, a pad and a lead all follow the same progression without a wire from one shared source to every part. An explicit wire always overrides the context. Select nodes and the nodes that feed the context itself don't read it. Section overrides on the key's Scale node or on the Progression change the context per section, for example a key change in B.
 
 ## Data types
 
@@ -80,7 +80,7 @@ Nodes are small, single-purpose and grouped into categories that follow the type
 | Notes | Operate on note streams: octave, quantize, velocity, humanize, legato, delay, filter, split, repeat, merge | Notes → Notes |
 | Counterpoint | Write voices that obey the rules (see below), or harmonize a line in the key | Notes, Chord → Notes |
 | Control | Numbers over time for automation: LFOs, ramps, steps | → Control |
-| Structure | The Harmonic context and section switches; any selection can also become a group | any → any |
+| Structure | The Harmonic context and Select nodes; any selection can also become a group | any → any |
 | Sound and effects | The built-in instruments, mixer and effects | Notes, Audio → Audio |
 | Output | Speakers, and MIDI notes or controls to external gear | Notes, Audio, Control → |
 | Analysis | Views that follow playback: piano roll and staff (with the rule overlay), circle of fifths, Tonnetz, interval matrix | any → (view only) |
@@ -124,13 +124,13 @@ A project is one graph organized into a harmonic context, a set of parts, and an
 | Drums | none | Pattern grid per drum (kick, snare, hats) → Drum hit → Merge | Drum synth |
 | Bass | Harmonic context | Euclidean 5 of 8 → Chord root (octave 2) | Mono synth |
 | Pads | Harmonic context | Voice (4 notes, G3–G5) → Voice lead → Play chords | Poly synth → Chorus |
-| Lead | Harmonic context | Euclidean → Arpeggiator → Section switch (plays in A and B) | Poly synth → Delay |
+| Lead | Harmonic context | Euclidean → Arpeggiator → Select, driven by a Section control (plays in A and B) | Poly synth → Delay |
 
 The parts meet in a Mixer → Reverb → Audio out. Each group exposes its key settings (◆) on its face, such as the drum patterns and the bass's notes per bar.
 
-**Arrangement.** The timeline is a list of named sections (Intro 8 bars, A 16, B 16, A 16, Outro 8). Each section can set its own tempo and override any node parameter, which covers key and progression through the key's Scale node and the Progression; the meter is one for the whole song in v1. An "Edit section only" toggle sends parameter edits to the selected section, and overridden parameters are marked on the nodes. Section switch nodes (notes, rhythm, chords, scale) pick different inputs per section, for example a busier drum pattern in B. Each distinct set of overrides compiles to its own graph, and every section is evaluated in its own time from bar 1. Under the sections, each part has a lane with an overview of its notes, which expands into a piano roll or staff; the timeline zooms and scrolls.
+**Arrangement.** The timeline is a list of named sections (Intro 8 bars, A 16, B 16, A 16, Outro 8). Each section can set its own tempo and override any node parameter, which covers key and progression through the key's Scale node and the Progression; the meter is one for the whole song in v1. An "Edit section only" toggle sends parameter edits to the selected section, and overridden parameters are marked on the nodes. Select nodes (notes, rhythm, chords, scale) pass on one of their inputs by number; a Section control, which gives each named section a value, drives that number to pick different inputs per section, for example a busier drum pattern in B. Each distinct set of overrides compiles to its own graph, and every section is evaluated in its own time from bar 1. Under the sections, each part has a lane with an overview of its notes, which expands into a piano roll or staff; the timeline zooms and scrolls.
 
-**Variation over repeats.** Section switch lists can name a particular repeat (A#2 is the second A), unlocked random nodes play new material in every section and repeat, and a section can override a seed or a lock, so a second A section can differ (a new seed, an added voice) without copying the graph.
+**Variation over repeats.** A Section control's entries can name a particular repeat (A#2 is the second A), unlocked random nodes play new material in every section and repeat, and a section can override a seed or a lock, so a second A section can differ (a new seed, an added voice) without copying the graph.
 
 **Groups.** Any selection can be collapsed into a group (Ctrl+G); wires crossing its edge become its ports, and settings inside can be exposed (◆) to show on the group node. Groups nest, can be saved to a library shared between projects, and are flattened when the engine reads the project, so inner nodes are addressed by path (drums/kick). Nodes can be copied and pasted (with the wires between them) between graphs, groups and windows.
 

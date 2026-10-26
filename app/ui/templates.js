@@ -95,22 +95,24 @@ export function padsPart(id, x, y) {
 }
 
 /** An arpeggio over the chords (from the harmonic context), playing only in the sections
- * listed in its switch. */
+ * listed in its Section node (1 picks the Select's input, other sections get 0: none). */
 export function leadPart(id, x, y, sections = 'A, B') {
+  const values = sections.split(',').map((s) => s.trim()).filter(Boolean).map((s) => `${s} = 1`).join(', ');
   return group(id, 'Lead', x, y, {
     outputs: [['audio', 'audio']],
-    exposed: ['sw.a', 'arp.pattern', 'r.hits'],
-    labels: { 'sw.a': 'Plays in', 'r.hits': 'Notes per bar' },
+    exposed: ['sec.values', 'arp.pattern', 'r.hits'],
+    labels: { 'sec.values': 'Plays in', 'r.hits': 'Notes per bar' },
     nodes: [
       { id: 'r', type: 'euclid', x: 0, y: 240, params: { hits: 7, steps: 16, rotate: 2, step: '1/16' } },
       { id: 'arp', type: 'arp', x: 300, y: 0, params: { pattern: 'Up-down', octave: 5, range: 1, gate: 70, velocity: 85 } },
-      { id: 'sw', type: 'switch_notes', x: 620, y: 0, params: { a: sections, b: '', c: '', d: '' } },
+      { id: 'sec', type: 'section', x: 300, y: 420, params: { values, default: 0 } },
+      { id: 'sel', type: 'select_notes', x: 620, y: 0, params: { input: 1 }, pins: { params: ['input'] } },
       { id: 'syn', type: 'poly_synth', x: 940, y: 0, params: { ...LEAD } },
       { id: 'fx', type: 'fx_delay', x: 1260, y: 0, params: { time: '1/8 dotted', feedback: 40, mix: 30, ping_pong: true, tone: 3000 } },
     ],
     wires: [
-      wire('r', 'rhythm', 'arp', 'rhythm'), wire('arp', 'notes', 'sw', 'a'),
-      wire('sw', 'out', 'syn', 'notes'), wire('syn', 'audio', 'fx', 'audio'), wire('fx', 'audio', '@out', 'audio'),
+      wire('r', 'rhythm', 'arp', 'rhythm'), wire('arp', 'notes', 'sel', '1'), wire('sec', 'control', 'sel', 'param.input'),
+      wire('sel', 'out', 'syn', 'notes'), wire('syn', 'audio', 'fx', 'audio'), wire('fx', 'audio', '@out', 'audio'),
     ],
   });
 }

@@ -191,6 +191,7 @@ static SPECS: &[&NodeSpec] = &[
     &note_ops::LEGATO,
     &note_ops::NOTE_DELAY,
     &note_ops::FILTER,
+    &note_ops::RHYTHM_GATE,
     &note_ops::SPLIT_RANGE,
     &note_ops::REPEAT_BARS,
     &note_ops::MERGE,
@@ -206,12 +207,14 @@ static SPECS: &[&NodeSpec] = &[
     &control::LFO,
     &control::RAMP,
     &control::STEPS,
+    &control::RANDOM,
+    &structure::SECTION,
     // Structure
     &structure::CONTEXT,
-    &structure::SWITCH_NOTES,
-    &structure::SWITCH_RHYTHM,
-    &structure::SWITCH_CHORD,
-    &structure::SWITCH_SCALE,
+    &structure::SELECT_NOTES,
+    &structure::SELECT_RHYTHM,
+    &structure::SELECT_CHORD,
+    &structure::SELECT_SCALE,
     // Built-in sound
     &sound::POLY_SYNTH,
     &sound::MONO_SYNTH,
@@ -275,6 +278,7 @@ pub fn build(
         "legato" => note_ops::build_legato(&p),
         "note_delay" => note_ops::build_note_delay(&p),
         "note_filter" => note_ops::build_filter(&p),
+        "rhythm_gate" => note_ops::build_rhythm_gate(&p),
         "split_range" => note_ops::build_split_range(&p),
         "repeat_bars" => note_ops::build_repeat_bars(&p),
         "harmonizer" => note_ops::build_harmonizer(&p),
@@ -298,9 +302,11 @@ pub fn build(
         "lfo" => control::build_lfo(&p),
         "ramp" => control::build_ramp(&p),
         "steps" => control::build_steps(&p),
+        "random" => control::build_random(&p),
         "context" => structure::build_context(&p),
-        "switch_notes" | "switch_rhythm" | "switch_chord" | "switch_scale" => {
-            structure::build_switch(&p)
+        "section" => structure::build_section(&p),
+        "select_notes" | "select_rhythm" | "select_chord" | "select_scale" => {
+            structure::build_select(&p)
         }
         "midi_out" => output::build_midi_out(&p),
         "midi_cc" => output::build_midi_cc(&p),

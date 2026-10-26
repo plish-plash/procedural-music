@@ -161,10 +161,10 @@ pub static PROGRESSION: NodeSpec = NodeSpec {
     kind: "progression",
     title: "Progression",
     category: "Theory",
-    help: "Chords over time, as Roman numerals in the key (ii7 V7 Imaj7) or chord symbols (Dm7 G7 Cmaj7). \
-           Roman numerals take the key from the Key input (a Scale node, or the Harmonic context); \
-           when the key changes, the numerals follow it. '-' holds the previous chord one more step; \
-           '|' is ignored.",
+    help: "Chords over time, as Roman numerals in the key (ii7 V7 Imaj7), scale degrees (1 4 5, \
+           each chord built in thirds on that degree, as in Chord from degree) or chord symbols \
+           (Dm7 G7 Cmaj7). Numerals and degrees follow the Key input as it changes. '-' holds the \
+           previous chord one more step; '|' is ignored.",
     inputs: &[optional("key", PortType::Scale)],
     outputs: &[port("chords", PortType::Chord)],
     params: &[
@@ -172,7 +172,12 @@ pub static PROGRESSION: NodeSpec = NodeSpec {
         ParamSpec {
             name: "notation",
             label: "Notation",
-            kind: ParamKind::Choice { options: &["Roman numerals", "Chord symbols"], default: "Roman numerals" },
+            kind: ParamKind::Choice { options: &["Roman numerals", "Degrees", "Chord symbols"], default: "Roman numerals" },
+        },
+        ParamSpec {
+            name: "size",
+            label: "Size",
+            kind: ParamKind::Choice { options: &["Triad", "7th", "9th"], default: "Triad" },
         },
         ParamSpec {
             name: "bars",
@@ -189,11 +194,21 @@ fn chord_timeline(prog: &Progression) -> Timeline<Chord> {
 
 pub fn build_progression(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     let text = p.text("chords");
-    let roman = p.text("notation") == "Roman numerals";
+    let notation = p.text("notation");
     let octave = p.int("octave");
     let bar = Meter::COMMON.ticks_per_bar();
     let duration = ((p.number("bars") * bar as f64).round() as u32).max(1);
-    if !roman {
+    if notation == "Degrees" {
+        let steps = parse_degrees(&text, duration)?;
+        let size = chord_size(&p.text("size"));
+        return node(move |ins, _| {
+            let keys = ins
+                .scale(0)
+                .ok_or("degrees need a key: wire a Scale into Key (or add a Harmonic context)")?;
+            Ok(vec![Some(Value::Chord(degrees_in_keys(&steps, keys, size, octave)))])
+        });
+    }
+    if notation == "Chord symbols" {
         let prog = Progression::from_symbols(&text, duration, octave)
             .ok_or_else(|| bad_token(&text, |t| Chord::from_symbol(t, octave).is_some()))?;
         if prog.is_empty() {
@@ -231,12 +246,10 @@ fn roman_in_keys(text: &str, shape: &Progression, keys: &Timeline<Scale>, durati
         parsed.push((*key, p));
         Some(p)
     };
-    let length = shape.length();
     if keys.is_constant() {
         return chord_timeline(&in_key(keys.at(0).value).unwrap_or(*shape));
     }
-    let together = length / gcd(length, keys.length()) * keys.length();
-    let total = if together <= 16 * length.max(keys.length()) { together } else { length };
+    let total = span_with_keys(shape.length(), keys);
     let mut steps = Vec::new();
     let mut t = 0;
     while t < total {
@@ -247,6 +260,74 @@ fn roman_in_keys(text: &str, shape: &Progression, keys: &Timeline<Scale>, durati
         }
     }
     Timeline::from_steps(steps).expect("non-empty")
+}
+
+/// How long a progression of `length` runs against a changing key: the two together, or
+/// one pass of the progression if that would be very long.
+fn span_with_keys(length: Ticks, keys: &Timeline<Scale>) -> Ticks {
+    let together = length / gcd(length, keys.length()) * keys.length();
+    if together <= 16 * length.max(keys.length()) {
+        together
+    } else {
+        length
+    }
+}
+
+/// Degrees ("1 4 - 5", 1 the root, negative below it) as (duration, zero-based degree)
+/// steps; '-' lengthens the previous step and '|' is ignored.
+fn parse_degrees(text: &str, duration: Ticks) -> Result<Vec<(Ticks, i32)>, String> {
+    let mut steps: Vec<(Ticks, i32)> = Vec::new();
+    for token in text.split_whitespace() {
+        match token {
+            "|" => {}
+            "-" => match steps.last_mut() {
+                Some(last) => last.0 += duration,
+                None => return Err("'-' needs a chord before it".into()),
+            },
+            _ => {
+                let d: i32 = token.parse().map_err(|_| format!("can't read '{token}' as a degree"))?;
+                if d == 0 {
+                    return Err("degrees count from 1; there is no degree 0".into());
+                }
+                steps.push((duration, if d > 0 { d - 1 } else { d }));
+            }
+        }
+    }
+    if steps.is_empty() {
+        return Err("no chords".into());
+    }
+    if steps.len() > pm_theory::MAX_PROGRESSION_STEPS {
+        return Err(format!("at most {} chords", pm_theory::MAX_PROGRESSION_STEPS));
+    }
+    Ok(steps)
+}
+
+/// The chords on `steps`' degrees, each built in the key sounding when it starts.
+fn degrees_in_keys(steps: &[(Ticks, i32)], keys: &Timeline<Scale>, size: usize, octave: i32) -> Timeline<Chord> {
+    if keys.is_constant() {
+        let key = keys.at(0).value;
+        let chords = steps.iter().map(|&(d, deg)| (d, key.chord_on_degree(deg, size, octave)));
+        return Timeline::from_steps(chords.collect()).expect("non-empty");
+    }
+    let total = span_with_keys(steps.iter().map(|s| s.0).sum(), keys);
+    let mut out = Vec::new();
+    let mut t = 0;
+    while t < total {
+        for &(d, deg) in steps {
+            out.push((d, keys.at(t).value.chord_on_degree(deg, size, octave)));
+            t += d;
+        }
+    }
+    Timeline::from_steps(out).expect("non-empty")
+}
+
+/// Notes in a chord of a "Size" setting.
+fn chord_size(name: &str) -> usize {
+    match name {
+        "7th" => 4,
+        "9th" => 5,
+        _ => 3,
+    }
 }
 
 fn gcd(a: Ticks, b: Ticks) -> Ticks {
@@ -299,8 +380,8 @@ pub static TRANSPOSE: NodeSpec = NodeSpec {
     kind: "transpose",
     title: "Transpose",
     category: "Theory",
-    help: "Moves every chord by a number of semitones, or by steps of the key, so C moves to Dm, \
-           then Em, in C major. Scale steps use the key input (or the Harmonic context).",
+    help: "Moves every chord by a number of semitones, or by steps of the Key input, so C moves \
+           to Dm, then Em, in C major.",
     inputs: &[port("chords", PortType::Chord), optional("key", PortType::Scale)],
     outputs: &[port("chords", PortType::Chord)],
     params: &[
@@ -377,8 +458,7 @@ pub static CHORD_DEGREE: NodeSpec = NodeSpec {
     kind: "chord_degree",
     title: "Chord from degree",
     category: "Theory",
-    help: "The chord built in thirds on a degree of the key: degree 5 of C major is G (or G7). \
-           Pin the degree and drive it with Steps or an LFO to make a progression.",
+    help: "The chord built in thirds on a degree of the key: degree 5 of C major is G (or G7).",
     inputs: &[port("key", PortType::Scale)],
     outputs: &[port("chord", PortType::Chord)],
     params: &[
@@ -398,11 +478,7 @@ pub static CHORD_DEGREE: NodeSpec = NodeSpec {
 
 pub fn build_chord_degree(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     let degree = p.int("degree") - 1;
-    let size = match p.text("size").as_str() {
-        "7th" => 4,
-        "9th" => 5,
-        _ => 3,
-    };
+    let size = chord_size(&p.text("size"));
     let octave = p.int("octave");
     node(move |ins, _| {
         let Some(keys) = ins.scale(0) else {
@@ -1024,6 +1100,43 @@ mod tests {
         }
         // No key: a problem to fix, not silence.
         assert!(n.eval(&Inputs { values: vec![None] }, &ctx).is_err());
+    }
+
+    #[test]
+    fn progression_from_degrees() {
+        use crate::spec::ParamValue;
+        let spec = crate::nodes::spec_for("progression").unwrap();
+        let build = |chords: &str, size: &str| {
+            let values: std::collections::HashMap<String, ParamValue> = [
+                ("chords".to_string(), ParamValue::Text(chords.into())),
+                ("notation".to_string(), ParamValue::Text("Degrees".into())),
+                ("size".to_string(), ParamValue::Text(size.into())),
+            ]
+            .into();
+            crate::nodes::build(spec, &values)
+        };
+        let ctx = EvalContext::new(0, 960, Meter::COMMON, 0);
+        let bar = Meter::COMMON.ticks_per_bar();
+        let run = |n: &dyn NodeImpl, keys: Timeline<Scale>| match &n.eval(&Inputs { values: vec![Some(Value::Scale(keys))] }, &ctx).unwrap()[0] {
+            Some(Value::Chord(t)) => names(t),
+            other => panic!("{other:?}"),
+        };
+        let c_major = Timeline::constant(Scale::parse("C major").unwrap());
+        let n = build("1 4 | 5 - 6", "Triad").unwrap();
+        assert_eq!(
+            run(n.as_ref(), c_major.clone()),
+            [(bar, "C".into()), (bar, "F".into()), (2 * bar, "G".into()), (bar, "Am".into())]
+        );
+        let sevenths = build("2 5 1", "7th").unwrap();
+        assert_eq!(run(sevenths.as_ref(), c_major).iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(), ["Dm7", "G7", "Cmaj7"]);
+        // The key is read at each chord.
+        let keys = Timeline::from_steps(vec![(2 * bar, Scale::parse("C major").unwrap()), (2 * bar, Scale::parse("F major").unwrap())]).unwrap();
+        let n = build("1 5", "Triad").unwrap();
+        assert_eq!(run(n.as_ref(), keys).into_iter().map(|(_, n)| n).collect::<Vec<_>>(), ["C", "G", "F", "C"]);
+        assert!(n.eval(&Inputs { values: vec![None] }, &ctx).is_err());
+        assert!(build("1 0", "Triad").is_err());
+        assert!(build("- 1", "Triad").is_err());
+        assert!(build("1 IV", "Triad").is_err());
     }
 
     #[test]

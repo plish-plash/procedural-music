@@ -100,7 +100,7 @@ export class Timeline {
 
   build() {
     this.addBtn = el('button', { title: 'Add a section after the selected one', onclick: () => this.addSection() }, '+ Section');
-    this.nameIn = el('input', { type: 'text', class: 'tl-name', spellcheck: 'false', title: 'Section name: sections with the same name share a colour, and Section switch nodes match on it' });
+    this.nameIn = el('input', { type: 'text', class: 'tl-name', spellcheck: 'false', title: 'Section name: sections with the same name share a colour, and Section nodes match on it' });
     this.barsIn = el('input', { type: 'number', min: 1, max: 999, step: 1, class: 'tl-bars', title: 'Length in bars' });
     this.bpmIn = el('input', { type: 'number', min: 20, max: 400, step: 1, class: 'tl-bpm', placeholder: 'song', title: 'Tempo for this section (empty: the song tempo)' });
     this.editBtn = el('button', { class: 'tl-edit', title: 'While on, parameter changes apply to this section only' }, 'Edit this section only');

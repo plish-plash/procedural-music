@@ -167,7 +167,7 @@ export class Inspector {
     }
     return el('div', { class: 'insp-empty' },
       el('p', {}, 'Select a node to see its settings and preview here.'),
-      el('p', {}, 'Pin (●) the preview or a setting to show it on the node. A pinned setting gets an input that a Control node (LFO, Ramp, Steps) can drive.'));
+      el('p', {}, 'Pin (●) the preview or a setting to show it on the node. A pinned setting gets an input that a Control node (LFO, Ramp, Steps, Random) can drive.'));
   }
 
   /** Updates what the engine reports (preview, text, problems) without rebuilding controls. */

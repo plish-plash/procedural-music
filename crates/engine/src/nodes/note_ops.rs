@@ -363,6 +363,61 @@ pub fn build_filter(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     })
 }
 
+pub static RHYTHM_GATE: NodeSpec = NodeSpec {
+    kind: "rhythm_gate",
+    title: "Rhythm gate",
+    category: "Notes",
+    help: "Combines notes with a rhythm, like Combine does two rhythms: And keeps the notes that \
+           start on a hit, Notes not rhythm the ones that don't. Or adds a note on every hit that \
+           has none, repeating the latest notes (from up to a bar before); Xor does both of the last two.",
+    inputs: &[port("notes", PortType::Notes), port("rhythm", PortType::Rhythm)],
+    outputs: &[port("notes", PortType::Notes)],
+    params: &[ParamSpec {
+        name: "op",
+        label: "Operation",
+        kind: ParamKind::Choice { options: &["And", "Or", "Xor", "Notes not rhythm"], default: "And" },
+    }],
+};
+
+pub fn build_rhythm_gate(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
+    let op = p.text("op");
+    let keep_on = matches!(op.as_str(), "And" | "Or");
+    let keep_off = op != "And";
+    let fill = matches!(op.as_str(), "Or" | "Xor");
+    windowed(
+        // A bar back, for the notes that empty hits repeat.
+        |ctx| (ctx.start.saturating_sub(ctx.meter.ticks_per_bar()), ctx.end),
+        move |ins, ctx| {
+            let input = ins.notes(0);
+            let Some(rhythm) = ins.rhythm(1) else {
+                return Ok(input.to_vec());
+            };
+            let mut hits = Vec::new();
+            rhythm.for_each_in(ctx.start, ctx.end, |t, o| hits.push((t, *o)));
+            let on_hit = |t: Ticks| hits.binary_search_by_key(&t, |h| h.0).is_ok();
+            let mut out: Vec<Note> = input
+                .iter()
+                .filter(|n| if on_hit(n.start) { keep_on } else { keep_off })
+                .copied()
+                .collect();
+            if fill {
+                for (t, onset) in &hits {
+                    if input.iter().any(|n| n.start == *t) {
+                        continue;
+                    }
+                    let Some(latest) = input.iter().filter(|n| n.start < *t).map(|n| n.start).max() else {
+                        continue;
+                    };
+                    for n in input.iter().filter(|n| n.start == latest) {
+                        out.push(Note { start: *t, duration: onset.duration, velocity: onset.velocity, ..*n });
+                    }
+                }
+            }
+            Ok(out)
+        },
+    )
+}
+
 pub static SPLIT_RANGE: NodeSpec = NodeSpec {
     kind: "split_range",
     title: "Split by range",
@@ -523,6 +578,28 @@ mod tests {
         assert_eq!(shape_velocity(90, "Linear", 1.0, 127.0), 90);
         assert!(shape_velocity(40, "Soft", 1.0, 127.0) > 40);
         assert!(shape_velocity(40, "Hard", 1.0, 127.0) < 40);
+    }
+
+    #[test]
+    fn rhythm_gate_combines_notes_with_hits() {
+        // Hits on beats 1 and 3; notes on beat 1 (a two-note chord) and beat 2.
+        let rhythm = || Some(Value::Rhythm(Box::new(pm_theory::Rhythm::from_grid("X.x.", PPQ).unwrap())));
+        let line = || Some(Value::Notes(vec![note(0, "C4"), note(0, "E4"), note(PPQ, "D4")]));
+        let gate = |op: &str| {
+            let out = run("rhythm_gate", &[("op", ParamValue::Text(op.into()))], vec![line(), rhythm()], 0, BAR);
+            out.iter().map(|n| (n.start, n.pitch.to_string())).collect::<Vec<_>>()
+        };
+        let at = |t: Ticks, p: &str| (t, p.to_string());
+        assert_eq!(gate("And"), [at(0, "C4"), at(0, "E4")]);
+        assert_eq!(gate("Notes not rhythm"), [at(PPQ, "D4")]);
+        // The empty hit on beat 3 repeats the latest notes, D4, with the hit's length and loudness.
+        assert_eq!(gate("Or"), [at(0, "C4"), at(0, "E4"), at(PPQ, "D4"), at(2 * PPQ, "D4")]);
+        assert_eq!(gate("Xor"), [at(PPQ, "D4"), at(2 * PPQ, "D4")]);
+        let or = run("rhythm_gate", &[("op", ParamValue::Text("Or".into()))], vec![line(), rhythm()], 0, BAR);
+        assert_eq!((or[3].duration, or[3].velocity), (PPQ, pm_theory::Onset::NORMAL));
+        // In the next bar, with no notes of its own, the hits repeat the bar before's last note.
+        let next = run("rhythm_gate", &[("op", ParamValue::Text("Or".into()))], vec![line(), rhythm()], BAR, 2 * BAR);
+        assert_eq!(next.iter().map(|n| (n.start, n.pitch.to_string())).collect::<Vec<_>>(), [at(BAR, "D4"), at(BAR + 2 * PPQ, "D4")]);
     }
 
     #[test]

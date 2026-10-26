@@ -15,13 +15,12 @@
 // automatable parameter gets an input port named `param.<name>` that a Control can drive.
 
 import { el, svg } from './dom.js';
-import { keyParams } from './templates.js';
 import { renderCurve, renderKeys, renderPlain, renderRoll, renderStaff, renderSteps, renderTheory, showPlayhead } from './views.js';
 
 export { el, svg };
 
 const WIDE = new Set(['progression', 'voice', 'voice_lead', 'drop', 'invert', 'play_chords', 'transpose', 'chord',
-  'switch_notes', 'switch_rhythm', 'switch_chord', 'switch_scale', 'tonnetz', 'interval_matrix',
+  'section', 'tonnetz', 'interval_matrix',
   'chord_degree', 'extend', 'substitute', 'borrow', 'secondary_dominant', 'spread', 'close_open']);
 const XWIDE = new Set(['counterpoint', 'piano_roll']);
 const IN = '@in';
@@ -82,61 +81,34 @@ function normalizeGraph(g) {
   };
 }
 
+/** The document version this editor writes. */
+export const DOC_VERSION = 2;
+
 /**
- * Brings a graph saved by an older version up to date (in place, recursing into groups):
- * a Progression's key was a text setting with a Key output, and is now a Scale node wired
- * into its Key input; the Arpeggiator's input was a scale and is now chords. Records each
- * moved key as [old flat id, new flat id] in `moves`, for section overrides.
+ * Upgrades for documents saved by older versions: `MIGRATIONS[v]` changes a version-v
+ * document (a private copy, edited in place) into version v + 1. Bump DOC_VERSION when
+ * adding one. Nested group graphs can be reached with `eachGraph`.
  */
-function migrateGraph(g, prefix, moves) {
+const MIGRATIONS = {};
+
+/** Calls `f(graph, pathPrefix)` for a document's graph and every group graph inside it. */
+function eachGraph(g, f, prefix = '') {
   if (!g?.nodes) return;
-  const wires = g.wires ?? (g.wires = []);
-  const added = [];
-  const taken = (id) => g.nodes.some((m) => m.id === id) || added.some((m) => m.id === id);
-  for (const n of g.nodes) {
-    if (n.type === 'group') migrateGraph(n.graph, `${prefix}${n.id}/`, moves);
-    if (n.type === 'arp') {
-      for (const w of wires) if (w.to.node === n.id && w.to.port === 'scale') w.to.port = 'chords';
-    }
-    if (n.type === 'progression' && typeof n.params?.key === 'string') {
-      const text = n.params.key.trim();
-      delete n.params.key;
-      const keyOut = wires.filter((w) => w.from.node === n.id && w.from.port === 'key');
-      if (!text) {
-        for (const w of keyOut) wires.splice(wires.indexOf(w), 1);
-        continue;
-      }
-      let id = `${n.id}-key`;
-      while (taken(id)) id += '_';
-      added.push({ id, type: 'scale', x: n.x ?? 0, y: (n.y ?? 0) - 220, params: keyParams(text) });
-      for (const w of keyOut) w.from = { node: id, port: 'scale' };
-      wires.push({ from: { node: id, port: 'scale' }, to: { node: n.id, port: 'key' } });
-      moves.push([prefix + n.id, prefix + id]);
-    }
-  }
-  g.nodes.push(...added);
+  f(g, prefix);
+  for (const n of g.nodes) if (n.type === 'group') eachGraph(n.graph, f, `${prefix}${n.id}/`);
 }
 
+/** A copy of `doc` brought up to DOC_VERSION (a document without a version is taken as current). */
 function migrateDoc(doc) {
   const out = structuredClone(doc ?? {});
-  const moves = [];
-  migrateGraph(out, '', moves);
-  for (const s of out.arrangement?.sections ?? []) {
-    const over = s.overrides ?? {};
-    for (const [from, to] of moves) {
-      if (typeof over[from]?.key !== 'string') continue;
-      over[to] = { ...(over[to] ?? {}), ...keyParams(over[from].key) };
-      delete over[from].key;
-      if (!Object.keys(over[from]).length) delete over[from];
-    }
-  }
+  for (let v = out.version ?? DOC_VERSION; v < DOC_VERSION; v++) MIGRATIONS[v]?.(out, { eachGraph });
   return out;
 }
 
 export function normalizeDoc(doc) {
   doc = migrateDoc(doc);
   return {
-    version: 2,
+    version: DOC_VERSION,
     bpm: doc.bpm ?? 110,
     ...(doc.clockPort ? { clockPort: doc.clockPort } : {}),
     ...(doc.clockInPort ? { clockInPort: doc.clockInPort } : {}),

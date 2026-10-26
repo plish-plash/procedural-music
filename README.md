@@ -62,9 +62,10 @@ The **MIDI ▾** menu holds the rest of the MIDI setup:
   left unwired anywhere (inside groups too) reads them, shown as "(context)" on the port.
   A wire always wins. The Song template feeds it from a key (a Scale node) and a
   Progression, so Bass, Pads and Lead follow along without wires.
-- A **Progression** reads Roman numerals in the key wired into its Key input (a Scale node,
-  or the Harmonic context); change the key and the chords follow. Chord symbols need no key.
-- **Randomness**: random nodes (Random walk, Markov, Probability, Humanize, Arpeggiator's
+- A **Progression** reads Roman numerals or scale degrees ("1 4 5", as triads, 7ths or 9ths)
+  in the key wired into its Key input (a Scale node, or the Harmonic context); change the
+  key and the chords follow. Chord symbols need no key.
+- **Randomness**: random nodes (Random walk, Markov, Probability, Humanize, Random, Arpeggiator's
   Random pattern, Counterpoint's Variety) play something new on every Play. 🔒 on the node (or in the inspector) locks
   one, keeping what it's playing now, and it then plays the same every time; 🎲 rerolls
   a locked node. In the toolbar, **🔓 Fresh / 🔒 Locked** does the same for the whole
@@ -75,7 +76,9 @@ The **MIDI ▾** menu holds the rest of the MIDI setup:
   preview by default.
 - A pinned number setting gets a violet input on the node: wire a **Control** node into it
   to automate the setting. *LFO* repeats a wave between two values, *Ramp* moves from one
-  value to another over some bars, *Steps* holds a list of values in turn. Values are in
+  value to another over some bars, *Steps* holds a list of values in turn and *Random*
+  picks a new value in a range; both move on at each hit of a rhythm wired in, or once a
+  bar without one. Values are in
   the setting's own units (an LFO from 1 to 7 on Mode rotate's Degree walks the modes), and
   are read every sixteenth while playing. Synth and effect settings (cutoff, levels, mix)
   can be automated too, as can Mixer levels for fades. Drop a control wire on empty canvas
@@ -103,10 +106,12 @@ The **MIDI ▾** menu holds the rest of the MIDI setup:
 - **Rhythm nodes** build and bend patterns: *Pattern*, *Euclidean*, *Polyrhythm* (3 against
   4 and the like), *Combine*, *Rotate*, *Subdivide* (ratchets), *Swing*, *Accent* (an accent
   pattern over the hits) and *Probability* (each hit plays with some chance, rolled again
-  every pass; lock it to keep the same hits). Hits with a chance show faded in the step grid.
+  every pass; lock it to keep the same hits; unwired, it thins out sixteenths). Hits with a
+  chance show faded in the step grid.
 - **Note nodes** reshape parts: *Octave*, *Quantize to scale*, *Velocity* (with a curve),
   *Humanize* (small random timing and loudness), *Legato* (hold each note to the next),
-  *Note delay* (with echoes), *Note filter*, *Split by range*, *Repeat bars* (loop the first
+  *Note delay* (with echoes), *Note filter*, *Rhythm gate* (and/or/xor notes with a rhythm's
+  hits, like Combine), *Split by range*, *Repeat bars* (loop the first
   bars of every block into a riff), *Merge* and *Split voices*. *Harmonizer* adds a
   parallel third or sixth in the key.
 - **Analysis** nodes show harmony as it plays: *Circle of fifths* (the key on the rim,
@@ -148,9 +153,12 @@ notes below. Each section has a name, a length in bars and, optionally, its own 
 - **Edit *B* only**: while on (the canvas gets an orange edge), parameter changes apply to
   the selected section only. Changed parameters show an orange dot; click it to go back
   to the song's value. Groups show how many of their parameters a section changes.
-- **Section switch** nodes (notes, rhythm, chords or scale) pass on one of their inputs
-  depending on the section: list section names per input (`A, Outro`, `*` for any,
-  `A#2` for the second A). The template's lead plays only in A and B this way.
+- **Select** nodes (notes, rhythm, chords or scale) pass on one of their inputs, chosen by
+  number (0 for none); pin Input to automate it. A **Section** control outputs a value for
+  each section (`A = 1, Outro = 2`, `*` for any, `A#2` for the second A; a Default for the
+  rest), so wiring it into a Select's Input plays different inputs in different sections,
+  and wiring it into any other setting changes that setting by section. The template's
+  lead plays only in A and B this way.
 - Each section starts its own time from bar 1, so a progression or phrase restarts with
   every section. Random nodes that aren't locked play something new in each section.
 - **Play once / Loop song / Loop section** sets what Play does.

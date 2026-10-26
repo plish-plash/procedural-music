@@ -1650,10 +1650,14 @@ mod tests {
         let doc = GraphDoc {
             nodes: vec![
                 // 0 to 127 and back over a bar, as steps of 0, 64 and 127 a beat each.
-                n("s", "steps", &[("values", ParamValue::Text("0 64 127 127".into())), ("step", ParamValue::Text("1/4".into()))]),
+                n("s", "steps", &[("values", ParamValue::Text("0 64 127 127".into()))]),
+                n("beats", "pattern", &[("pattern", ParamValue::Text("x".into())), ("step", ParamValue::Text("1/4".into()))]),
                 n("cc", "midi_cc", &[("cc", ParamValue::Number(1.0)), ("channel", ParamValue::Number(2.0))]),
             ],
-            wires: vec![WireDoc { from_node: "s".into(), from_port: "control".into(), to_node: "cc".into(), to_port: "value".into() }],
+            wires: vec![
+                WireDoc { from_node: "beats".into(), from_port: "rhythm".into(), to_node: "s".into(), to_port: "rhythm".into() },
+                WireDoc { from_node: "s".into(), from_port: "control".into(), to_node: "cc".into(), to_port: "value".into() },
+            ],
             ..Default::default()
         };
         let mut e = Engine::new();

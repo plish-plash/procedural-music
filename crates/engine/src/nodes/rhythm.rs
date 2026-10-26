@@ -1,9 +1,9 @@
 //! Rhythm sources and transforms.
 
 use super::theory::node;
-use super::{step_ticks, NodeImpl, STEP_OPTIONS};
+use super::{default_pulse, step_ticks, NodeImpl, STEP_OPTIONS};
 use crate::rng;
-use crate::spec::{port, NodeSpec, ParamKind, ParamSpec, Params, PortType};
+use crate::spec::{optional, port, NodeSpec, ParamKind, ParamSpec, Params, PortType};
 use crate::value::Value;
 use pm_theory::{Meter, Onset, Rhythm, Ticks};
 
@@ -149,9 +149,9 @@ pub static PROBABILITY: NodeSpec = NodeSpec {
     kind: "probability",
     title: "Probability",
     category: "Rhythm",
-    help: "Gives every hit a chance of playing, rolled again on each pass, so a pattern thins out \
-           and varies. Accents can be kept. Locked, the same hits play every time.",
-    inputs: &[port("rhythm", PortType::Rhythm)],
+    help: "Gives every hit a chance of playing, so a pattern thins out and varies. Accents can be \
+           kept. With no rhythm, it thins out sixteenths.",
+    inputs: &[optional("rhythm", PortType::Rhythm)],
     outputs: &[port("rhythm", PortType::Rhythm)],
     params: &[
         ParamSpec {
@@ -171,9 +171,8 @@ pub fn build_probability(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     let lock = p.flag("lock");
     let seed = p.number("seed") as u64;
     node(move |ins, ctx| {
-        let Some(r) = ins.rhythm(0) else {
-            return Ok(vec![None]);
-        };
+        let pulse = default_pulse();
+        let r = ins.rhythm(0).unwrap_or(&pulse);
         let stream = rng::stream(lock, seed, ctx.salt);
         rhythm_out(r.with_chance(chance, accents, rng::hash(&[stream, 0x9e0b])))
     })
@@ -390,5 +389,12 @@ mod tests {
         };
         assert_ne!(hits(1, false), hits(2, false));
         assert_eq!(hits(1, true), hits(2, true));
+
+        // With no rhythm, it thins out straight sixteenths.
+        let out = &run("probability", &[("chance", ParamValue::Number(50.0))], None)[0];
+        let mut t = Vec::new();
+        out.for_each_in(0, 3840, |x, _| t.push(x));
+        assert!(t.iter().all(|x| x % 240 == 0));
+        assert!((4..12).contains(&t.len()), "{t:?}");
     }
 }

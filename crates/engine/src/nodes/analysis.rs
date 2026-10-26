@@ -19,8 +19,7 @@ pub static CIRCLE: NodeSpec = NodeSpec {
     title: "Circle of fifths",
     category: "Analysis",
     help: "Shows the key and the chords on the circle of fifths: the key's notes around the rim, \
-           the sounding chord's notes joined inside, and the path of the chord roots. Lights up \
-           with playback. Unwired, it shows the song's harmonic context. Display only.",
+           the sounding chord's notes joined inside, and the path of the chord roots.",
     inputs: &[optional("key", PortType::Scale), optional("chords", PortType::Chord)],
     outputs: &[],
     params: &[],
@@ -32,8 +31,7 @@ pub static TONNETZ: NodeSpec = NodeSpec {
     category: "Analysis",
     help: "Shows the chords on the Tonnetz, a grid of notes where fifths run across and major \
            thirds up: every major and minor triad is a triangle, and chords that share notes sit \
-           side by side, so smooth voice leading looks like short steps. Lights up with playback. \
-           Unwired, it shows the song's harmonic context. Display only.",
+           side by side, so smooth voice leading looks like short steps.",
     inputs: &[optional("chords", PortType::Chord)],
     outputs: &[],
     params: &[],
@@ -45,8 +43,7 @@ pub static INTERVALS: NodeSpec = NodeSpec {
     category: "Analysis",
     help: "Shows the interval between every two notes of the sounding chord, coloured by how they \
            sound (perfect, consonant, dissonant), and its interval-class vector: how many of each \
-           interval it holds. Lights up with playback. Unwired, it shows the song's harmonic \
-           context. Display only.",
+           interval it holds.",
     inputs: &[optional("chords", PortType::Chord)],
     outputs: &[],
     params: &[],

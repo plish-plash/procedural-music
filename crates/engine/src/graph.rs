@@ -328,7 +328,7 @@ impl Graph {
 
         // The harmonic context: scale and chord inputs left unwired read it (a wire always
         // wins). Nodes that feed the context can't read it, which also rules out loops;
-        // section switches pick among their own inputs, so they don't either.
+        // Selects pick among their own inputs, so they don't either.
         let mut implicit = Vec::new();
         let contexts: Vec<usize> = (0..nodes.len())
             .filter(|&i| nodes[i].spec.kind == "context")
@@ -343,7 +343,7 @@ impl Graph {
             let feeds = feeding(&nodes, c);
             for i in 0..nodes.len() {
                 let kind = nodes[i].spec.kind;
-                if feeds[i] || kind == "context" || kind.starts_with("switch_") {
+                if feeds[i] || kind == "context" || kind.starts_with("select_") {
                     continue;
                 }
                 for (k, port) in nodes[i].spec.inputs.iter().enumerate() {
@@ -1248,7 +1248,7 @@ pub(crate) mod tests {
                 node("root", "chord_root", &[]),
                 node("x", "chord", &[("symbol", text("Dm"))]),
                 node("pc", "play_chords", &[]),
-                node("sw", "switch_chord", &[]),
+                node("sw", "select_chord", &[]),
                 node("seq", "sequencer", &[("degrees", text("1 2 3"))]),
             ],
             wires: vec![
@@ -1263,7 +1263,7 @@ pub(crate) mod tests {
         assert!(g.issues().is_empty(), "{:?}", g.issues());
         let r = g.report(Meter::COMMON, 2, true);
         let fed: Vec<(&str, &str)> = r.context.iter().map(|(n, p)| (n.as_str(), p.as_str())).collect();
-        // Unwired chord and scale inputs read it; a wire wins; switches don't.
+        // Unwired chord and scale inputs read it; a wire wins; selects don't.
         assert_eq!(fed, [("root", "chords"), ("seq", "scale")]);
         let preview = |id: &str| r.previews.iter().find(|p| p.0 == id).map(|p| p.1.clone()).unwrap_or_default();
         // One held root per chord (no rhythm wired): C, then F.

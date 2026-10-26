@@ -70,7 +70,7 @@ pub static MIDI_CC: NodeSpec = NodeSpec {
     kind: "midi_cc",
     title: "MIDI CC out",
     category: "Output",
-    help: "Sends a control (an LFO, Ramp or Steps) to a MIDI port as control changes, pitch bend or \
+    help: "Sends a control to a MIDI port as control changes, pitch bend or \
            channel pressure, every sixteenth while it changes. CC and pressure take values 0–127 (so \
            set the control's range to match); pitch bend takes −1 to 1, with 0 the centre.",
     inputs: &[port("value", PortType::Control)],

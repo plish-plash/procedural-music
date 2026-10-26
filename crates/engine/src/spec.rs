@@ -119,6 +119,7 @@ pub enum ParamKind {
 /// (node kind, setting, the setting it depends on, the values that show it).
 static CONDITIONS: &[(&str, &str, &str, &[&str])] = &[
     ("scale", "notes", "scale", &["Custom"]),
+    ("progression", "size", "notation", &["Degrees"]),
     ("transpose", "semitones", "by", &["Semitones"]),
     ("transpose", "steps", "by", &["Scale steps"]),
     ("midi_cc", "cc", "message", &["Control change"]),
