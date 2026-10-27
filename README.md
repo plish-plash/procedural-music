@@ -1,51 +1,71 @@
-# Procedural Music (working title)
+# Procedural Music
 
-A node-graph app for procedural music, built around music theory and multi-voice
-harmony. All five roadmap phases of v1 are in place: the theory core, the graph with
-scheduler, MIDI out and node editor, the built-in instruments and effects, counterpoint,
-and composition (groups, the arrangement timeline, and MIDI/WAV export).
+A desktop app for making music by wiring up music theory.
 
-## Layout
+In Procedural Music, scales, chords, progressions and rhythms are values that flow along
+typed wires between nodes. Nodes transform them (change mode, voice-lead, substitute,
+syncopate), turn them into notes (arpeggios, basslines, random walks, Markov melodies,
+four-part counterpoint), and play the result through built-in synths and drums or send
+it to your MIDI gear. Every node shows a live preview of what it's producing, so the
+theory is something you can see and hear at each step, not just the end result.
 
-| Path | What it is |
-| --- | --- |
-| `crates/theory` (`pm-theory`) | Theory core: tunings, pitches, scales, chords, Roman numerals, rhythms, progressions, voicing and voice leading. No dependencies; builds without `std`. |
-| `crates/synth` (`pm-synth`) | Built-in sound: poly and mono subtractive synths, a synthesized GM drum kit, filter, drive, chorus, delay, reverb, mixer, and the rack that wires them together. No dependencies. |
-| `crates/counterpoint` (`pm-counterpoint`) | The counterpoint solver: species rhythms, the rule set, beam search with local improvement, and explanations (which rules each note bends, and the next-best note). Depends only on `pm-theory`. |
-| `crates/engine` (`pm-engine`) | Node catalog, graph evaluation, the arrangement and transport, lookahead scheduler, MIDI dispatch, offline rendering and MIDI file export, plus the JSON command API the UI talks to. Depends on the three crates above. |
-| `crates/cli` (`pm`) | Command-line theory demo that writes MIDI files. |
-| `app` (`pm-app`) | Tauri 2 desktop app: hosts the editor UI (`app/ui`, plain HTML/JS, no build step), runs the engine on a scheduler thread, plays audio with `cpal` and sends MIDI with `midir`. Its own Cargo workspace. |
+It's generative but repeatable: random parts play something new on every pass until you
+like what you hear, and then you lock them. And it's live: the graph is evaluated just
+ahead of the playhead, so you can rewire and retune while the music plays.
 
-## Running the app (Windows)
+![The Full song example: key and progression feed a harmonic context that the drums, bass, pads and lead groups follow; the inspector shows the progression's chords, and the timeline below shows the arrangement and every part's notes](docs/full-song.png)
+
+**Highlights**
+
+- **Theory you can see and hear.** Keys, modes and custom scales; progressions in Roman
+  numerals, scale degrees or chord symbols; voicings and voice leading; extensions,
+  substitutions, modal borrowing and secondary dominants. Click any preview to hear it.
+- **One harmony, many parts.** A Harmonic context node carries the song's key and chords
+  to every part that doesn't have its own, so a bassline, pads and a lead follow the same
+  progression without a tangle of wires.
+- **Counterpoint with explanations.** A solver writes up to four voices by the rules of
+  species counterpoint, and shows which rules each note bends and why it won over the
+  next-best choice.
+- **Whole songs.** Parts become groups, sections arrange them on a timeline with their
+  own tempos and settings, and Perform mode cues sections live.
+- **Theory views.** Circle of fifths, Tonnetz and interval matrix nodes follow the
+  harmony as it plays.
+- **Sound and MIDI.** Built-in poly, mono and drum synths with effects, or MIDI out per
+  part, with CC, clock in and out, and latency compensation. Export to WAV or a
+  standard MIDI file.
+
+The design and its reasoning are in [DESIGN.md](DESIGN.md).
+
+## Getting started
+
+You need a Rust toolchain and the system libraries Tauri uses
+([Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)). The app is developed
+and tested on Windows.
 
 ```
-cargo run --manifest-path app\Cargo.toml
+cargo run --manifest-path app/Cargo.toml
 ```
 
 The first build downloads and compiles Tauri, which takes a few minutes.
 
-The examples play through the built-in instruments on your default audio output. To
-drive external synths instead, end a chain in **MIDI out** and pick the port. **MIDI CC out**
-sends a Control (an LFO, Ramp or Steps) as control changes, pitch bend or channel pressure.
-The **MIDI ▾** menu holds the rest of the MIDI setup:
-- **Clock out** sends MIDI clock and start/stop to a port.
-- **Clock in** follows another device's clock: its tempo and Start/Continue/Stop drive
-  playback (the BPM box shows the incoming tempo while following).
-- **Latency** shifts everything sent to a port by some milliseconds, so external synths
-  line up with the built-in sound. It's saved on this computer, not in the project.
-- **Refresh ports** looks for newly connected devices.
+Then:
 
-**File ▾ › Export WAV audio** renders the built-in instruments to a file faster than real time.
+- **File ▾ › Examples** loads the demo patches: *Full song*, *Modal explorer*,
+  *Progression to pads*, *Full band*, *First species*, *Chorale* (all on the built-in
+  synths) and *Full band (MIDI)*. Press **Space** to play.
+- **File ▾ › New song** starts from a template: drums, bass, pads and lead as groups,
+  following one key and progression, with a short arrangement. **New empty patch** gives
+  a blank canvas.
 
-### Using the editor
+The examples play through the built-in instruments on your default audio output.
 
-- **File ▾ › New song** starts from a template: drums, bass, pads and lead as groups, fed by one
-  progression, with a short arrangement. **New empty patch** gives a blank canvas.
-- **File ▾ › Examples** loads the demo patches: *Full song*, *Modal explorer*, *Progression to pads*,
-  *Full band*, *First species*, *Chorale* (all on the built-in synths) and *Full band (MIDI)*.
+## Using the editor
+
+### Building a patch
+
 - Double-click the canvas (or press Tab) to add a node; type to search.
-- Drag from an output dot to an input dot to connect. Drop a wire on empty canvas to
-  get a menu of nodes that accept it. Drag a connected input's dot to move or remove its wire.
+- Drag from an output dot to an input dot to connect. Drop a wire on empty canvas to get
+  a menu of nodes that accept it. Drag a connected input's dot to move or remove its wire.
 - Port colors: scale (teal), chord (amber), rhythm (pink), notes (blue), audio (lime
   triangles), control (violet triangles). A chord wired into a scale input is converted
   automatically (shown with a badge on the wire). Sound chains run instrument → effects →
@@ -58,6 +78,19 @@ The **MIDI ▾** menu holds the rest of the MIDI setup:
   controls as a curve. They show what is playing: the 4 bars around the playhead, in the
   section playing, with its random choices and automation. Stopped, they show where Play
   will start, with what was last heard.
+- **Pin** (●) the preview or a setting in the inspector to show it on the node too. Source
+  nodes (Scale, Pattern, LFO…), Progression, Counterpoint and analysis nodes show their
+  preview by default.
+- To hear a scale, chord, progression or rhythm without wiring it up, click ▶ on its
+  preview or click the name of its output. A scale plays as a run, chords as blocks and
+  a rhythm as clicks, through a preview instrument, even while the song plays.
+- Hover a wire to see what it carries: the value on that output, drawn like a preview,
+  with its text. Wires into and out of groups show the value from the node that makes it.
+- Edits apply while playing. Ctrl+S saves a `.pmpatch` file, and the current patch is
+  also autosaved between sessions.
+
+### Harmony
+
 - A **Harmonic context** node sets the song's key and chords: any scale or chord input
   left unwired anywhere (inside groups too) reads them, shown as "(context)" on the port.
   A wire always wins. The Song template feeds it from a key (a Scale node) and a
@@ -65,67 +98,47 @@ The **MIDI ▾** menu holds the rest of the MIDI setup:
 - A **Progression** reads Roman numerals or scale degrees ("1 4 5", as triads, 7ths or 9ths)
   in the key wired into its Key input (a Scale node, or the Harmonic context); change the
   key and the chords follow. Chord symbols need no key.
-- **Randomness**: random nodes (Random walk, Markov, Probability, Humanize, Random, Arpeggiator's
-  Random pattern, Counterpoint's Variety) play something new on every Play. 🔒 on the node (or in the inspector) locks
-  one, keeping what it's playing now, and it then plays the same every time; 🎲 rerolls
-  a locked node. In the toolbar, **🔓 Fresh / 🔒 Locked** does the same for the whole
-  song, and 🎲 there rerolls everything unlocked (or the song's seed, when locked).
-  Exports match what you heard.
-- **Pin** (●) the preview or a setting in the inspector to show it on the node too. Source
-  nodes (Scale, Pattern, LFO…), Progression, Counterpoint and analysis nodes show their
-  preview by default.
-- A pinned number setting gets a violet input on the node: wire a **Control** node into it
-  to automate the setting. *LFO* repeats a wave between two values, *Ramp* moves from one
-  value to another over some bars, *Steps* holds a list of values in turn and *Random*
-  picks a new value in a range; both move on at each hit of a rhythm wired in, or once a
-  bar without one. Values are in
-  the setting's own units (an LFO from 1 to 7 on Mode rotate's Degree walks the modes), and
-  are read every sixteenth while playing. Synth and effect settings (cutoff, levels, mix)
-  can be automated too, as can Mixer levels for fades. Drop a control wire on empty canvas
-  to pick a node to automate.
-- To hear a scale, chord, progression or rhythm without wiring it up, click ▶ on its
-  preview or click the name of its output. A scale plays as a run, chords as blocks and
-  a rhythm as clicks, through a preview instrument, even while the song plays.
-- Hover a wire to see what it carries: the value on that output, drawn like a preview,
-  with its text. Wires into and out of groups show the value from the node that makes it.
-- **Harmony nodes** work in the key (the key input, or the Harmonic context when unwired):
-  *Chord from degree* builds the chord on a degree (pin the degree and drive it with Steps
-  to write a progression), *Extend* stacks 7ths to 13ths in the key, *Substitute* swaps in
-  tritone, relative or parallel chords, *Borrow* takes chords on chosen degrees from a
-  parallel mode (iv, ♭VI, ♭VII), and *Secondary dominant* slips V7 of each target chord in
-  before it. *Transpose* moves chords by semitones or by scale steps, *Transpose key* moves
-  a scale, and *Scale set* intersects, joins or subtracts two scales. A Scale node set to
-  **Custom** gets a one-octave picker for its notes.
-- **Voicing nodes** place chords: *Voice*, *Voice lead*, *Drop voicing*, *Invert*, *Spread*
-  (bass kept, the rest spread over some octaves) and *Close / open*.
-- **Melody nodes** play one note per rhythm hit: the *Arpeggiator* runs through each chord's
-  tones; *Degree sequencer*, *Random walk*, *Markov* (learns which degree follows which from a melody,
-  typed as degrees or wired into Train, and improvises in its style), and *Contour* (a line
-  that rises, falls, arches or waves over each phrase) play from a scale. *Motif transform* plays each phrase
-  of a melody backwards, upside down (in the key), stretched or squeezed.
-- **Rhythm nodes** build and bend patterns: *Pattern*, *Euclidean*, *Polyrhythm* (3 against
-  4 and the like), *Combine*, *Rotate*, *Subdivide* (ratchets), *Swing*, *Accent* (an accent
-  pattern over the hits) and *Probability* (each hit plays with some chance, rolled again
-  every pass; lock it to keep the same hits; unwired, it thins out sixteenths). Hits with a
-  chance show faded in the step grid.
-- **Note nodes** reshape parts: *Octave*, *Quantize to scale*, *Velocity* (with a curve),
-  *Humanize* (small random timing and loudness), *Legato* (hold each note to the next),
-  *Note delay* (with echoes), *Note filter*, *Rhythm gate* (and/or/xor notes with a rhythm's
-  hits, like Combine), *Split by range*, *Repeat bars* (loop the first
-  bars of every block into a riff), *Merge* and *Split voices*. *Harmonizer* adds a
-  parallel third or sixth in the key.
-- **Analysis** nodes show harmony as it plays: *Circle of fifths* (the key on the rim,
-  the chord as a shape, the path of the roots), *Tonnetz* (the chord's triads on the
-  grid of fifths and thirds) and *Interval matrix* (every interval in the chord, and its
-  interval-class vector). Unwired, they show the Harmonic context.
-- Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste nodes (with the wires between them), into
-  any graph or group, and between windows; pasted nodes land under the mouse.
-- Space plays and stops; edits apply while playing. Del removes, Ctrl+D duplicates,
-  F frames everything, the mouse wheel zooms, dragging the background pans and
-  Shift-dragging selects a box of nodes. Ctrl+Z and Ctrl+Y undo and redo.
-- Ctrl+S saves a `.pmpatch` file; the current patch is also autosaved between sessions.
-- **File ▾ › Export** renders the song to a WAV file, or writes a standard MIDI file with one
-  track per part (named after its group) and the tempo changes.
+- A Scale node set to **Custom** gets a one-octave picker for its notes.
+
+### The nodes
+
+| Family | Nodes |
+| --- | --- |
+| **Harmony** (in the key: the key input, or the Harmonic context) | *Chord from degree* builds the chord on a degree (pin the degree and drive it with Steps to write a progression). *Extend* stacks 7ths to 13ths. *Substitute* swaps in tritone, relative or parallel chords. *Borrow* takes chords on chosen degrees from a parallel mode (iv, ♭VI, ♭VII). *Secondary dominant* slips V7 of each target chord in before it. *Transpose* moves chords by semitones or by scale steps, *Transpose key* moves a scale, and *Scale set* intersects, joins or subtracts two scales. |
+| **Voicing** | *Voice*, *Voice lead*, *Drop voicing*, *Invert*, *Spread* (bass kept, the rest spread over some octaves) and *Close / open*. |
+| **Melody** (one note per rhythm hit) | The *Arpeggiator* runs through each chord's tones. *Degree sequencer*, *Random walk*, *Markov* (learns which degree follows which from a melody, typed as degrees or wired into Train, and improvises in its style) and *Contour* (a line that rises, falls, arches or waves over each phrase) play from a scale. *Motif transform* plays each phrase of a melody backwards, upside down (in the key), stretched or squeezed. |
+| **Rhythm** | *Pattern*, *Euclidean*, *Polyrhythm* (3 against 4 and the like), *Combine*, *Rotate*, *Subdivide* (ratchets), *Swing*, *Accent* (an accent pattern over the hits) and *Probability* (each hit plays with some chance, rolled again every pass; unwired, it thins out sixteenths). Hits with a chance show faded in the step grid. |
+| **Notes** | *Octave*, *Quantize to scale*, *Velocity* (with a curve), *Humanize* (small random timing and loudness), *Legato* (hold each note to the next), *Note delay* (with echoes), *Note filter*, *Rhythm gate* (and/or/xor notes with a rhythm's hits, like Combine), *Split by range*, *Repeat bars* (loop the first bars of every block into a riff), *Merge* and *Split voices*. *Harmonizer* adds a parallel third or sixth in the key. |
+| **Analysis** (follow the harmony as it plays; unwired, they show the Harmonic context) | *Circle of fifths* (the key on the rim, the chord as a shape, the path of the roots), *Tonnetz* (the chord's triads on the grid of fifths and thirds) and *Interval matrix* (every interval in the chord, and its interval-class vector). |
+
+Parts (*Play chords*, *Chord root*, *Drum hit*), control, structure, sound and output
+nodes are covered in the sections below; every node explains itself in the inspector.
+
+### Randomness
+
+Random nodes (Random walk, Markov, Probability, Humanize, Random, the Arpeggiator's Random
+pattern, Counterpoint's Variety) play something new on every Play.
+
+- 🔒 on the node (or in the inspector) locks one, keeping what it's playing now; it then
+  plays the same every time. 🎲 rerolls a locked node.
+- In the toolbar, **🔓 Fresh / 🔒 Locked** does the same for the whole song, and 🎲 there
+  rerolls everything unlocked (or the song's seed, when locked).
+- Exports match what you heard.
+
+### Automation
+
+A pinned number setting gets a violet input on the node: wire a **Control** node into it
+to automate the setting.
+
+- *LFO* repeats a wave between two values, and *Ramp* moves from one value to another over
+  some bars.
+- *Steps* holds a list of values in turn, and *Random* picks a new value in a range; both
+  move on at each hit of a rhythm wired in, or once a bar without one.
+- Values are in the setting's own units (an LFO from 1 to 7 on Mode rotate's Degree walks
+  the modes), and are read every sixteenth while playing.
+- Synth and effect settings (cutoff, levels, mix) can be automated too, as can Mixer
+  levels for fades.
+- Drop a control wire on empty canvas to pick a node to automate.
 
 ### Groups
 
@@ -141,6 +154,9 @@ the path at the top left goes back up. Inside a group:
 
 **⋯** on a group renames it, ungroups it (Ctrl+Shift+G), or saves it to the **library**;
 saved groups appear under *Library* in the add-node menu of every project.
+
+Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste nodes (with the wires between them), into any
+graph or group, and between windows; pasted nodes land under the mouse.
 
 ### Arranging a song
 
@@ -176,6 +192,8 @@ Parameter edits wait for the bar line, and controls shown on groups get bigger.
 
 ### Counterpoint
 
+![The Chorale example: a Counterpoint node writes soprano, alto, tenor and bass over a progression in G major, shown as a piano roll with each voice in its own colour](docs/counterpoint.png)
+
 The **Counterpoint** node writes up to four voices (soprano, alto, tenor, bass). Set each
 voice to *Off*, *Free* (the solver writes it) or *Fixed* (the line wired into `fixed`, such
 as a cantus firmus). With no fixed voice, wire a progression into `chords` and it writes
@@ -196,6 +214,40 @@ line or progression.
 - **Split voices** sends each voice to its own instrument (soprano = v1 … bass = v4), and
   **Piano roll** shows the notes on any wire.
 
+### MIDI and export
+
+To drive external synths, end a chain in **MIDI out** and pick the port. **MIDI CC out**
+sends a Control (an LFO, Ramp or Steps) as control changes, pitch bend or channel pressure.
+The **MIDI ▾** menu holds the rest of the MIDI setup:
+
+- **Clock out** sends MIDI clock and start/stop to a port.
+- **Clock in** follows another device's clock: its tempo and Start/Continue/Stop drive
+  playback (the BPM box shows the incoming tempo while following).
+- **Latency** shifts everything sent to a port by some milliseconds, so external synths
+  line up with the built-in sound. It's saved on this computer, not in the project.
+- **Refresh ports** looks for newly connected devices.
+
+**File ▾ › Export** renders the song through the built-in instruments to a WAV file
+(faster than real time), or writes a standard MIDI file with one track per part (named
+after its group) and the tempo changes.
+
+### Keyboard and mouse
+
+| Action | Keys |
+| --- | --- |
+| Add a node | Double-click the canvas, or Tab |
+| Play / stop | Space |
+| Remove, duplicate | Del, Ctrl+D |
+| Copy, cut, paste | Ctrl+C, Ctrl+X, Ctrl+V |
+| Undo, redo | Ctrl+Z, Ctrl+Y |
+| Group, ungroup | Ctrl+G, Ctrl+Shift+G |
+| Open a group, go back up | Enter (or double-click its header), Esc |
+| Frame everything | F |
+| Show or hide the inspector | I |
+| Save, save as, open | Ctrl+S, Ctrl+Shift+S, Ctrl+O |
+| Zoom, pan, select a box | Mouse wheel, drag the background, Shift-drag |
+| Cue a section (Perform mode) | 1–9 |
+
 ## Developing
 
 ```
@@ -207,6 +259,17 @@ cargo run -p pm-cli -- prog --key "C major" --out demo.mid "ii7 V7 Imaj7 -"
 
 The dev server runs the real engine behind the UI but sends no MIDI, which makes it
 handy for working on the editor.
+
+## Layout
+
+| Path | What it is |
+| --- | --- |
+| `crates/theory` (`pm-theory`) | Theory core: tunings, pitches, scales, chords, Roman numerals, rhythms, progressions, voicing and voice leading. No dependencies; builds without `std`. |
+| `crates/synth` (`pm-synth`) | Built-in sound: poly and mono subtractive synths, a synthesized GM drum kit, filter, drive, chorus, delay, reverb, mixer, and the rack that wires them together. No dependencies. |
+| `crates/counterpoint` (`pm-counterpoint`) | The counterpoint solver: species rhythms, the rule set, beam search with local improvement, and explanations (which rules each note bends, and the next-best note). Depends only on `pm-theory`. |
+| `crates/engine` (`pm-engine`) | Node catalog, graph evaluation, the arrangement and transport, lookahead scheduler, MIDI dispatch, offline rendering and MIDI file export, plus the JSON command API the UI talks to. Depends on the three crates above. |
+| `crates/cli` (`pm`) | Command-line theory demo that writes MIDI files. |
+| `app` (`pm-app`) | Tauri 2 desktop app: hosts the editor UI (`app/ui`, plain HTML/JS, no build step), runs the engine on a scheduler thread, plays audio with `cpal` and sends MIDI with `midir`. Its own Cargo workspace. |
 
 ## Design decisions in the code
 
@@ -247,3 +310,17 @@ handy for working on the editor.
   it is evaluating, and evaluates it in section time.
 - **Fixed-size theory values and integer time** (960 ticks per quarter note) keep the
   door open to running patches on a microcontroller later.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed
+as above, without any additional terms or conditions.
