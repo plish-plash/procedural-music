@@ -12,6 +12,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
 
+mod chance;
 mod chord;
 mod fixed;
 pub mod harmony;
@@ -27,6 +28,7 @@ mod time;
 mod tuning;
 pub mod voicing;
 
+pub use chance::{Chance, MAX_ROLLS};
 pub use chord::{Chord, ChordName, ChordQuality, QUALITIES};
 pub use fixed::{CapacityError, FixedVec};
 pub use note::Note;

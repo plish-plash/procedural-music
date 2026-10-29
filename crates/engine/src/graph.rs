@@ -743,7 +743,7 @@ impl Graph {
                 .position(|p| p.name == name)
                 .ok_or_else(|| format!("no output '{name}'"))?,
             None if outputs.is_empty() => return Err("this node has no output".into()),
-            None => 0,
+            None => self.nodes[i].spec.preview_output(),
         };
         self.run_preview(ctx, focus).outputs[i][out]
             .take()
@@ -792,7 +792,7 @@ impl Graph {
                         format!("{port} · ch {} · {what}{value}", channel + 1)
                     }
                 }
-            } else if let Some(v) = eval.outputs[i].iter().flatten().next() {
+            } else if let Some(v) = shown(&eval.outputs[i], node.spec) {
                 describe(v, meter)
             } else {
                 match node
@@ -808,7 +808,7 @@ impl Graph {
             };
             previews.push((node.id.clone(), text));
         }
-        // Nodes that draw their own view keep it; others show their first output.
+        // Nodes that draw their own view keep it; others show their preview output.
         let views = self
             .nodes
             .iter()
@@ -816,7 +816,7 @@ impl Graph {
             .filter_map(|(i, n)| {
                 let own = n.imp.as_ref().and_then(|imp| imp.view());
                 let view = own.or_else(|| {
-                    let v = eval.outputs[i].iter().flatten().next()?;
+                    let v = shown(&eval.outputs[i], n.spec)?;
                     value_view(v, meter, ctx.start, ctx.end - ctx.start)
                 })?;
                 Some((n.id.clone(), view))
@@ -840,6 +840,14 @@ impl Graph {
 const PREVIEW_SLICE: Ticks = pm_theory::PPQ / 4;
 
 /// Adds a sink's notes to the list, joining them with an earlier sink of the same node.
+/// The value a node's preview shows: its preview output, or failing that its first with a value.
+fn shown<'a>(outputs: &'a [Option<Value>], spec: &NodeSpec) -> Option<&'a Value> {
+    outputs
+        .get(spec.preview_output())
+        .and_then(Option::as_ref)
+        .or_else(|| outputs.iter().flatten().next())
+}
+
 fn merge_sink(out: &mut Vec<SinkOutput>, sink: SinkOutput) {
     match out.iter_mut().find(|o| o.node == sink.node) {
         Some(o) => o.notes.extend(sink.notes),
@@ -942,7 +950,7 @@ pub(crate) fn value_view(v: &Value, meter: Meter, start: Ticks, window: Ticks) -
                         ("t", Json::Num(o.offset as f64)),
                         ("d", Json::Num(o.duration as f64)),
                         ("vel", Json::Num(o.velocity as f64)),
-                        ("prob", Json::Num(o.probability as f64)),
+                        ("prob", Json::Num(o.probability() as f64)),
                     ])
                 })
                 .collect();
@@ -1354,6 +1362,21 @@ pub(crate) mod tests {
             r.previews.iter().find(|p| p.0 == "k").unwrap().1,
             "steps 0 5 7"
         );
+    }
+
+    #[test]
+    fn polyrhythm_previews_both() {
+        let doc = GraphDoc { nodes: vec![node("p", "polyrhythm", &[])], ..Default::default() };
+        let g = Graph::compile(&doc);
+        let r = g.report(Meter::COMMON, 1, true);
+        // 3 against 4 together: 6 hits (sharing the downbeat), not A's 3.
+        let onsets = view(&r, "p").get("onsets").unwrap().to_string();
+        assert_eq!(onsets.matches("\"t\"").count(), 6, "{onsets}");
+        let ctx = EvalContext::preview(Meter::COMMON, 1, true, 0, 0);
+        match g.output_value("p", None, &ctx, 0) {
+            Ok(Value::Rhythm(r)) => assert_eq!(r.len(), 6),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

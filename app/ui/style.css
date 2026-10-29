@@ -331,6 +331,7 @@ body.perform .head-buttons.rand .mini { font-size: 15px; padding: 2px 8px; }
 .step { fill: #1a1f28; stroke: none; }
 .step.hit { fill: var(--t-rhythm); }
 .step.maybe { stroke: var(--t-rhythm); stroke-width: 1; stroke-dasharray: 2 1.5; }
+.step.hit.dropped { fill: #1a1f28; stroke: var(--t-rhythm); stroke-width: 1; }
 .step.now { stroke: #e8ecf3; stroke-width: 1.5; stroke-dasharray: none; opacity: 1 !important; }
 .step-bar { stroke: #6f7a8c; stroke-width: 1; }
 

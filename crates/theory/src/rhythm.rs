@@ -2,6 +2,7 @@
 
 use core::fmt;
 
+use crate::chance::Chance;
 use crate::fixed::FixedVec;
 use crate::time::Ticks;
 use crate::MAX_ONSETS;
@@ -15,9 +16,10 @@ pub struct Onset {
     pub duration: Ticks,
     /// 1 to 127.
     pub velocity: u8,
-    /// Chance the onset plays, 0 to 100. Each pass of the loop rolls again, from the
-    /// rhythm's chance seed and the onset's absolute time (see [`Rhythm::for_each_in`]).
-    pub probability: u8,
+    /// Whether it plays on a given pass of the loop (rolled at its absolute time; see
+    /// [`Rhythm::for_each_in`]). A hit that never plays is dropped: it still counts as a
+    /// hit, but is silent.
+    pub chance: Chance,
 }
 
 impl Default for Onset {
@@ -26,7 +28,7 @@ impl Default for Onset {
             offset: 0,
             duration: 0,
             velocity: Onset::NORMAL,
-            probability: 100,
+            chance: Chance::ALWAYS,
         }
     }
 }
@@ -36,6 +38,11 @@ impl Onset {
     pub const NORMAL: u8 = 96;
     /// Velocity of an accented hit.
     pub const ACCENT: u8 = 127;
+
+    /// How often it plays, 0 to 100.
+    pub fn probability(&self) -> u8 {
+        self.chance.percent_of_time()
+    }
 }
 
 /// A looping pattern of onsets, sorted by offset, with at most one onset per offset.
@@ -45,8 +52,6 @@ pub struct Rhythm {
     /// Display grid hint: the step size the rhythm was built on.
     grid: Ticks,
     onsets: FixedVec<Onset, MAX_ONSETS>,
-    /// Picks which onsets with a probability under 100 play on each pass.
-    chance_seed: u64,
 }
 
 impl Rhythm {
@@ -57,7 +62,6 @@ impl Rhythm {
             length,
             grid: length,
             onsets: FixedVec::new(),
-            chance_seed: 0,
         }
     }
 
@@ -67,16 +71,16 @@ impl Rhythm {
         self
     }
 
-    /// Every onset given `percent` chance of playing (accents keep theirs when
-    /// `keep_accents`), with `seed` choosing which play on each pass.
+    /// Every onset given a further `percent` chance of playing (accents unchanged when
+    /// `keep_accents`), rolled from `seed`.
     pub fn with_chance(&self, percent: u8, keep_accents: bool, seed: u64) -> Rhythm {
+        let roll = Chance::percent(seed, percent);
         let mut out = *self;
         for o in out.onsets.iter_mut() {
             if !(keep_accents && o.velocity >= Onset::ACCENT) {
-                o.probability = (o.probability as u32 * percent.min(100) as u32 / 100) as u8;
+                o.chance = o.chance.and(roll);
             }
         }
-        out.chance_seed = seed;
         out
     }
 
@@ -87,11 +91,6 @@ impl Rhythm {
             o.velocity = f(o).clamp(1, 127);
         }
         out
-    }
-
-    /// Whether the onset starting at absolute time `t` plays on this pass.
-    pub fn plays(&self, t: Ticks, onset: &Onset) -> bool {
-        onset.probability >= 100 || (chance_roll(self.chance_seed, t) % 100) < onset.probability as u64
     }
 
     /// Each onset split into `n` equal hits (ratchets). `None` if that is more than
@@ -118,14 +117,15 @@ impl Rhythm {
     }
 
     /// Parses a step grid, one character per step of `step` ticks:
-    /// `x` hit, `X` accented hit, `.` or `-` rest, `_` tie (extends the previous hit).
-    /// Spaces and `|` are ignored. Returns `None` on other characters or too many hits.
+    /// `x` hit, `X` accented hit, `o` dropped hit (counts as a hit but doesn't play),
+    /// `.` or `-` rest, `_` tie (extends the previous hit). Spaces and `|` are ignored.
+    /// Returns `None` on other characters or too many hits.
     pub fn from_grid(pattern: &str, step: Ticks) -> Option<Rhythm> {
         let mut rhythm = Rhythm::new(1);
         let mut pos: Ticks = 0;
         for c in pattern.chars() {
             match c {
-                'x' | 'X' => {
+                'x' | 'X' | 'o' => {
                     let velocity = if c == 'X' {
                         Onset::ACCENT
                     } else {
@@ -137,7 +137,7 @@ impl Rhythm {
                             offset: pos,
                             duration: step,
                             velocity,
-                            probability: 100,
+                            chance: if c == 'o' { Chance::NEVER } else { Chance::ALWAYS },
                         })
                         .ok()?;
                 }
@@ -230,53 +230,117 @@ impl Rhythm {
         out
     }
 
-    /// Onsets of both rhythms; where both hit, the louder one wins. Lengths must match.
-    pub fn union(&self, other: &Rhythm) -> Option<Rhythm> {
-        if self.length != other.length {
-            return None;
+    /// The length two rhythms loop over together (the least common multiple of their
+    /// lengths), or `None` if that doesn't fit in [`Ticks`].
+    pub fn common_length(&self, other: &Rhythm) -> Option<Ticks> {
+        (self.length / gcd(self.length, other.length)).checked_mul(other.length)
+    }
+
+    /// Calls `f(offset, onset)` for this rhythm's onsets, looped to fill `length` (a
+    /// multiple of its own); `f` returns `false` to stop.
+    fn each_looped(&self, length: Ticks, mut f: impl FnMut(Ticks, &Onset) -> bool) {
+        if self.onsets.is_empty() {
+            return;
         }
-        let mut out = *self;
-        for o in other.onsets.iter() {
-            match out.onsets.binary_search_by_key(&o.offset, |x| x.offset) {
-                Ok(i) if out.onsets[i].velocity >= o.velocity => {}
-                _ => out.add(*o).ok()?,
+        let mut base = 0;
+        while base < length {
+            for o in self.onsets.iter() {
+                if !f(base + o.offset, o) {
+                    return;
+                }
             }
+            base += self.length;
         }
-        Some(out)
     }
 
-    /// Onsets of `self` where `other` also hits. Lengths must match.
+    /// An empty rhythm for the result of combining `self` with `other` over `length`.
+    fn combined(&self, other: &Rhythm, length: Ticks) -> Rhythm {
+        Rhythm {
+            length,
+            grid: gcd(self.grid, other.grid).max(1),
+            onsets: FixedVec::new(),
+            ..*self
+        }
+    }
+
+    /// Onsets of both rhythms, playing when either does; where both hit, the louder one's
+    /// velocity and length win. Rhythms of different lengths are looped until they line up
+    /// (see [`Rhythm::common_length`]). `None` if that is more than [`MAX_ONSETS`] hits.
+    pub fn union(&self, other: &Rhythm) -> Option<Rhythm> {
+        let length = self.common_length(other)?;
+        let mut out = self.combined(other, length);
+        let mut fits = true;
+        for r in [self, other] {
+            r.each_looped(length, |offset, o| {
+                let new = Onset { offset, ..*o };
+                match out.onsets.binary_search_by_key(&offset, |x| x.offset) {
+                    Ok(i) => {
+                        let have = out.onsets[i];
+                        let chance = have.chance.or(o.chance);
+                        out.onsets[i] = Onset { chance, ..if o.velocity > have.velocity { new } else { have } };
+                    }
+                    Err(i) => fits = out.onsets.insert(i, new).is_ok(),
+                }
+                fits
+            });
+        }
+        fits.then_some(out)
+    }
+
+    /// Onsets of `self` where `other` also hits, playing when both do; looped as in
+    /// [`Rhythm::union`].
     pub fn intersection(&self, other: &Rhythm) -> Option<Rhythm> {
-        self.filter_by(other, true)
+        self.filter_by(other, |a, b| b.map(|b| a.and(b)))
     }
 
-    /// Onsets of `self` where `other` does not hit. Lengths must match.
+    /// Onsets of `self` where `other` doesn't hit, looped as in [`Rhythm::union`]. Where
+    /// `other`'s hit is left to chance, the onset stays, and drops when that hit plays.
     pub fn difference(&self, other: &Rhythm) -> Option<Rhythm> {
-        self.filter_by(other, false)
+        self.filter_by(other, |a, b| match b {
+            Some(b) if b.is_always() => None,
+            Some(b) => Some(a.and_not(b)),
+            None => Some(a),
+        })
     }
 
-    /// Onsets where exactly one of the two rhythms hits. Lengths must match.
+    /// Onsets of `self`, dropped where `other` hits: they stay hits (counted by what
+    /// steps along a rhythm) but don't play. Looped as in [`Rhythm::union`].
+    pub fn drop_hits(&self, other: &Rhythm) -> Option<Rhythm> {
+        self.filter_by(other, |a, b| Some(b.map_or(a, |b| a.and_not(b))))
+    }
+
+    /// Onsets where exactly one of the two rhythms hits (or plays), looped as in
+    /// [`Rhythm::union`].
     pub fn xor(&self, other: &Rhythm) -> Option<Rhythm> {
         let a = self.difference(other)?;
         let b = other.difference(self)?;
         a.union(&b)
     }
 
-    fn filter_by(&self, other: &Rhythm, keep_shared: bool) -> Option<Rhythm> {
-        if self.length != other.length {
-            return None;
-        }
-        let mut out = *self;
-        out.onsets
-            .retain(|o| other.hits_at(o.offset) == keep_shared);
-        Some(out)
+    /// `self`'s onsets, looped to the common length, with chances from `f(own chance, the
+    /// chance of other's onset there)`; `None` from `f` leaves the onset out.
+    fn filter_by(&self, other: &Rhythm, f: impl Fn(Chance, Option<Chance>) -> Option<Chance>) -> Option<Rhythm> {
+        let length = self.common_length(other)?;
+        let mut out = self.combined(other, length);
+        let mut fits = true;
+        self.each_looped(length, |offset, o| {
+            if let Some(chance) = f(o.chance, other.onset_at(offset % other.length).map(|b| b.chance)) {
+                fits = out.onsets.push(Onset { offset, chance, ..*o }).is_ok();
+            }
+            fits
+        });
+        fits.then_some(out)
+    }
+
+    /// The onset starting exactly at `offset`, if any.
+    pub fn onset_at(&self, offset: Ticks) -> Option<&Onset> {
+        let i = self.onsets.binary_search_by_key(&offset, |o| o.offset).ok()?;
+        Some(&self.onsets[i])
     }
 
     /// Whether an onset starts exactly at `offset`.
     pub fn hits_at(&self, offset: Ticks) -> bool {
-        self.onsets
-            .binary_search_by_key(&offset, |o| o.offset)
-            .is_ok()
+        self.onset_at(offset).is_some()
     }
 
     /// Swing: onsets on the off-beat of each pair of `grid` steps move later.
@@ -311,7 +375,7 @@ impl Rhythm {
     }
 
     /// Calls `f(absolute_time, onset)` for every onset starting in `[start, end)` that
-    /// plays (see [`Rhythm::plays`]), treating the rhythm as looping forever from time 0.
+    /// plays (see [`Onset::chance`]), treating the rhythm as looping forever from time 0.
     pub fn for_each_in(&self, start: Ticks, end: Ticks, mut f: impl FnMut(Ticks, &Onset)) {
         if start >= end || self.onsets.is_empty() {
             return;
@@ -327,7 +391,7 @@ impl Rhythm {
                 if t >= end {
                     break;
                 }
-                if t >= start && self.plays(t, o) {
+                if t >= start && o.chance.plays(t) {
                     f(t, o);
                 }
             }
@@ -337,7 +401,8 @@ impl Rhythm {
 }
 
 impl fmt::Display for Rhythm {
-    /// A step grid like `x..x..x.`, on the finest step that fits the onsets and the grid it was built on.
+    /// A step grid like `x..x..o.` (as [`Rhythm::from_grid`] reads it), on the finest step
+    /// that fits the onsets and the grid it was built on.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let step = self
             .onsets
@@ -360,7 +425,9 @@ impl fmt::Display for Rhythm {
             let t = i * step;
             match self.onsets.iter().find(|o| o.offset == t) {
                 Some(o) => {
-                    f.write_str(if o.velocity >= Onset::ACCENT {
+                    f.write_str(if o.chance.is_never() {
+                        "o"
+                    } else if o.velocity >= Onset::ACCENT {
                         "X"
                     } else {
                         "x"
@@ -379,14 +446,6 @@ impl fmt::Display for Rhythm {
         }
         Ok(())
     }
-}
-
-/// A well-mixed number from a seed and a time (SplitMix64).
-fn chance_roll(seed: u64, t: Ticks) -> u64 {
-    let mut x = seed ^ (t as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    x ^ (x >> 31)
 }
 
 fn gcd(a: Ticks, b: Ticks) -> Ticks {
@@ -434,8 +493,66 @@ mod tests {
         assert_eq!(format!("{}", a.xor(&b).unwrap()), ".xx.");
         assert_eq!(format!("{}", a.rotate(SIXTEENTH as i64)), ".x.x");
         assert_eq!(format!("{}", a.rotate(-(SIXTEENTH as i64))), ".x.x");
-        let short = Rhythm::from_grid("x.", SIXTEENTH).unwrap();
-        assert!(a.union(&short).is_none());
+    }
+
+    #[test]
+    fn combining_follows_each_hits_chance() {
+        let span = 64 * 16 * SIXTEENTH;
+        let played = |r: &Rhythm| {
+            let mut v = std::vec::Vec::new();
+            r.for_each_in(0, span, |t, _| v.push(t));
+            v
+        };
+        let all = Rhythm::from_grid("xxxx", SIXTEENTH).unwrap();
+        let a = Rhythm::from_grid("xx.x", SIXTEENTH).unwrap().with_chance(50, false, 3);
+        let b = Rhythm::from_grid("x.x.", SIXTEENTH).unwrap().with_chance(50, false, 9);
+        let (pa, pb) = (played(&a), played(&b));
+        for t in (0..span).step_by(SIXTEENTH as usize) {
+            let (ia, ib) = (pa.contains(&t), pb.contains(&t));
+            let check = |r: Rhythm, expect: bool, what: &str| assert_eq!(played(&r).contains(&t), expect, "{what} at {t}");
+            check(a.union(&b).unwrap(), ia || ib, "or");
+            check(a.intersection(&b).unwrap(), ia && ib, "and");
+            check(a.difference(&b).unwrap(), ia && !ib, "a not b");
+            check(a.xor(&b).unwrap(), ia != ib, "xor");
+            check(all.drop_hits(&b).unwrap(), !ib, "drop");
+        }
+        // B's chancy hits leave A's as hits that sometimes drop; certain ones remove or drop them.
+        assert_eq!(all.difference(&b).unwrap().len(), 4);
+        let certain = Rhythm::from_grid("x.x.", SIXTEENTH).unwrap();
+        assert_eq!(format!("{}", all.difference(&certain).unwrap()), ".x.x");
+        assert_eq!(format!("{}", all.drop_hits(&certain).unwrap()), "oxox");
+        // Dropped hits read and print as 'o', and And keeps them.
+        let dropped = Rhythm::from_grid("xo..", SIXTEENTH).unwrap();
+        assert_eq!(format!("{dropped}"), "xo..");
+        assert_eq!(dropped.onsets()[1].probability(), 0);
+        assert_eq!(format!("{}", dropped.intersection(&all).unwrap()), "xo..");
+        assert_eq!(format!("{}", dropped.xor(&all).unwrap()), ".xxx", "a dropped hit doesn't cancel a played one");
+    }
+
+    #[test]
+    fn combines_rhythms_of_different_lengths() {
+        // 3 steps against 4: they line up every 12.
+        let three = Rhythm::from_grid("x..", SIXTEENTH).unwrap();
+        let four = Rhythm::from_grid("X...", SIXTEENTH).unwrap();
+        let or = three.union(&four).unwrap();
+        assert_eq!(or.length(), 12 * SIXTEENTH);
+        assert_eq!(format!("{or}"), "X..xX.x.Xx..");
+        assert_eq!(format!("{}", three.intersection(&four).unwrap()), "x...........");
+        assert_eq!(format!("{}", three.xor(&four).unwrap()), "...xX.x.Xx..");
+        assert_eq!(format!("{}", three.difference(&four).unwrap()), "...x..x..x..");
+        // A shorter rhythm that divides the longer one keeps the longer length.
+        let eighths = Rhythm::from_grid("x.", SIXTEENTH).unwrap();
+        let a = Rhythm::from_grid("xx..xx..", SIXTEENTH).unwrap();
+        assert_eq!(format!("{}", a.intersection(&eighths).unwrap()), "x...x...");
+        // Each keeps its own hits' timing when the result is played.
+        let mut times = std::vec::Vec::new();
+        or.for_each_in(0, 24 * SIXTEENTH, |t, _| times.push(t / SIXTEENTH));
+        assert_eq!(times, [0, 3, 4, 6, 8, 9, 12, 15, 16, 18, 20, 21]);
+        // More hits than a rhythm holds.
+        let busy = Rhythm::from_grid("xxxxxxxxxxxxxxxxx", SIXTEENTH).unwrap(); // 17 steps
+        let sixteen = Rhythm::from_grid("xxxxxxxxxxxxxxxx", SIXTEENTH).unwrap();
+        assert!(busy.union(&sixteen).is_none());
+        assert!(busy.intersection(&Rhythm::new(SIXTEENTH * 16)).is_some(), "an empty result fits");
     }
 
     #[test]

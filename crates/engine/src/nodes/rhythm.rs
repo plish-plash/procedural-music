@@ -20,7 +20,8 @@ pub static PATTERN: NodeSpec = NodeSpec {
     kind: "pattern",
     title: "Pattern",
     category: "Rhythm",
-    help: "A step pattern: x hit, X accent, . rest, _ hold the previous hit. Spaces and | are ignored.",
+    help: "A step pattern: x hit, X accent, o dropped hit (counts as a hit but doesn't play), . rest, \
+           _ hold the previous hit. Spaces and | are ignored.",
     inputs: &[],
     outputs: &[port("rhythm", PortType::Rhythm)],
     params: &[ParamSpec { name: "pattern", label: "Pattern", kind: ParamKind::Text { default: "x.x.x.xx" } }, STEP_PARAM],
@@ -29,7 +30,7 @@ pub static PATTERN: NodeSpec = NodeSpec {
 pub fn build_pattern(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     let text = p.text("pattern");
     let rhythm = Rhythm::from_grid(&text, step_ticks(&p.text("step")))
-        .ok_or("patterns use x X . - _ | and spaces, with at most 64 hits")?;
+        .ok_or("patterns use x X o . - _ | and spaces, with at most 64 hits")?;
     if text.chars().all(|c| c == ' ' || c == '|') {
         return Err("the pattern is empty".into());
     }
@@ -66,19 +67,22 @@ pub static COMBINE: NodeSpec = NodeSpec {
     kind: "combine",
     title: "Combine",
     category: "Rhythm",
-    help: "Combines two rhythms of the same length: Or (either hits), And (both), Xor (exactly one), A not B.",
+    help: "Combines two rhythms: Or (either hits), And (both), Xor (exactly one), A not B. Drop keeps \
+           A's hits where B hits as dropped hits: they don't play, but still count, so a Degree \
+           sequencer steps past them instead of waiting. Rhythms of different lengths repeat until \
+           they line up (3 steps against 4 make 12).",
     inputs: &[port("a", PortType::Rhythm), port("b", PortType::Rhythm)],
     outputs: &[port("rhythm", PortType::Rhythm)],
     params: &[ParamSpec {
         name: "op",
         label: "Operation",
-        kind: ParamKind::Choice { options: &["Or", "And", "Xor", "A not B"], default: "Or" },
+        kind: ParamKind::Choice { options: &["Or", "And", "Xor", "A not B", "Drop"], default: "Or" },
     }],
 };
 
 pub fn build_combine(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     let op = p.text("op");
-    node(move |ins, _| {
+    node(move |ins, ctx| {
         let (Some(a), Some(b)) = (ins.rhythm(0), ins.rhythm(1)) else {
             return Ok(vec![None]);
         };
@@ -86,13 +90,15 @@ pub fn build_combine(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
             "And" => a.intersection(b),
             "Xor" => a.xor(b),
             "A not B" => a.difference(b),
+            "Drop" => a.drop_hits(b),
             _ => a.union(b),
         }
         .ok_or_else(|| {
+            let bars = a.common_length(b).map_or(f64::INFINITY, |l| l as f64 / ctx.meter.ticks_per_bar() as f64);
             format!(
-                "the rhythms have different lengths ({} vs {} ticks)",
-                a.length(),
-                b.length()
+                "too many hits: the rhythms only line up every {} bars, and a rhythm holds at most {}",
+                (bars * 100.0).round() / 100.0,
+                pm_theory::MAX_ONSETS
             )
         })?;
         Ok(vec![Some(Value::Rhythm(Box::new(out)))])
@@ -370,6 +376,25 @@ mod tests {
         assert_eq!(poly[1].len(), 4);
         assert_eq!(poly[2].len(), 6); // 3 + 4, sharing the downbeat
         assert_eq!(poly[2].onsets()[0].velocity, Onset::ACCENT);
+    }
+
+    #[test]
+    fn combine_loops_rhythms_of_different_lengths() {
+        let combine = |op: &str, a: &str, b: &str| {
+            let values: HashMap<String, ParamValue> = [("op".to_string(), ParamValue::Text(op.into()))].into();
+            let n = build(spec_for("combine").unwrap(), &values).unwrap();
+            let rhythm = |s: &str| Some(Value::Rhythm(Box::new(Rhythm::from_grid(s, 240).unwrap())));
+            let ins = Inputs { values: vec![rhythm(a), rhythm(b)] };
+            n.eval(&ins, &EvalContext::new(0, 960, Meter::COMMON, 0)).map(|mut out| match out.remove(0) {
+                Some(Value::Rhythm(r)) => r.to_string(),
+                other => panic!("{other:?}"),
+            })
+        };
+        assert_eq!(combine("Or", "x..", "x...").unwrap(), "x..xx.x.xx..");
+        assert_eq!(combine("A not B", "x.x.x.x.", "x.").unwrap(), "........");
+        assert_eq!(combine("Drop", "xxxx", "x.").unwrap(), "oxox");
+        let err = combine("Or", "xxxxxxxxxxxxxxxxx", "xxxxxxxxxxxxxxxx").unwrap_err();
+        assert!(err.starts_with("too many hits: the rhythms only line up every 17 bars"), "{err}");
     }
 
     #[test]

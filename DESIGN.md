@@ -45,7 +45,7 @@ Port types split into three layers: abstract theory (what notes are allowed), ma
 | --- | --- | --- | --- | --- |
 | Scale | Root plus a set of pitch classes that repeats every octave, with spelling; supports degree arithmetic | D Dorian, C major pentatonic | Theory | teal circle |
 | Chord | A finite set of absolute pitches (a voicing), with optional root and symbol | Cmaj7 as C3 E3 G3 B3 | Theory | amber circle |
-| Rhythm | A looping pattern of onsets, each with offset, duration, velocity (accent) and probability | Euclidean 5 of 8 over 1 bar | Material | pink square |
+| Rhythm | A looping pattern of onsets, each with offset, duration, velocity (accent) and a chance of playing (up to three dice rolls and a truth table over them, so combining rhythms keeps which hits play; a hit that never plays is a dropped hit, still counted by the nodes that step along a rhythm) | Euclidean 5 of 8 over 1 bar | Material | pink square |
 | Notes | Concrete events: start, duration, pitch, velocity, voice number | A pad part for 8 bars | Material | blue square |
 | Control | A number over time: constant, LFO, ramp or steps | Filter cutoff ramp | Signal | violet triangle |
 | Audio | A stereo sample stream inside the built-in sound engine | Synth output | Signal | lime triangle |

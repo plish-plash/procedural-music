@@ -264,7 +264,7 @@ export function renderKeys(v) {
 }
 
 /** A rhythm as a row of grid steps: hits filled (brighter when louder, dashed when they
- * might not play), bar lines, and the step under the playhead lit. */
+ * might not play, outlined when dropped), bar lines, and the step under the playhead lit. */
 export function renderSteps(v) {
   const length = Math.max(1, v.length);
   let grid = v.grid > 0 ? v.grid : length / 16;
@@ -286,7 +286,7 @@ export function renderSteps(v) {
   for (const o of v.onsets ?? []) {
     const r = cellEls[Math.min(n - 1, Math.floor(o.t / grid))];
     r.classList.add('hit');
-    if (o.prob < 100) r.classList.add('maybe');
+    if (o.prob < 100) r.classList.add(o.prob === 0 ? 'dropped' : 'maybe');
     r.style.opacity = String((0.45 + 0.55 * (o.vel / 127)) * (o.prob < 100 ? 0.4 + 0.6 * (o.prob / 100) : 1));
   }
   if (v.bar && length > v.bar) {

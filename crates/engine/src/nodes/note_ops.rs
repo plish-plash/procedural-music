@@ -368,22 +368,25 @@ pub static RHYTHM_GATE: NodeSpec = NodeSpec {
     title: "Rhythm gate",
     category: "Notes",
     help: "Combines notes with a rhythm, like Combine does two rhythms: And keeps the notes that \
-           start on a hit, Notes not rhythm the ones that don't. Or adds a note on every hit that \
-           has none, repeating the latest notes (from up to a bar before); Xor does both of the last two.",
+           start on a hit, Drop the ones that don't. Or adds a note on every hit that has none, \
+           repeating the latest notes (from up to a bar before); Xor does both of the last two. \
+           Replace plays the latest notes on every hit instead, giving the notes the rhythm's timing.",
     inputs: &[port("notes", PortType::Notes), port("rhythm", PortType::Rhythm)],
     outputs: &[port("notes", PortType::Notes)],
     params: &[ParamSpec {
         name: "op",
         label: "Operation",
-        kind: ParamKind::Choice { options: &["And", "Or", "Xor", "Notes not rhythm"], default: "And" },
+        kind: ParamKind::Choice { options: &["And", "Or", "Xor", "Drop", "Replace"], default: "And" },
     }],
 };
 
 pub fn build_rhythm_gate(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
     let op = p.text("op");
     let keep_on = matches!(op.as_str(), "And" | "Or");
-    let keep_off = op != "And";
-    let fill = matches!(op.as_str(), "Or" | "Xor");
+    let keep_off = matches!(op.as_str(), "Or" | "Xor" | "Drop");
+    let fill = matches!(op.as_str(), "Or" | "Xor" | "Replace");
+    // Replace plays every hit; the others only the hits no note starts on.
+    let every_hit = op == "Replace";
     windowed(
         // A bar back, for the notes that empty hits repeat.
         |ctx| (ctx.start.saturating_sub(ctx.meter.ticks_per_bar()), ctx.end),
@@ -402,10 +405,10 @@ pub fn build_rhythm_gate(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                 .collect();
             if fill {
                 for (t, onset) in &hits {
-                    if input.iter().any(|n| n.start == *t) {
+                    if !every_hit && input.iter().any(|n| n.start == *t) {
                         continue;
                     }
-                    let Some(latest) = input.iter().filter(|n| n.start < *t).map(|n| n.start).max() else {
+                    let Some(latest) = input.iter().filter(|n| n.start <= *t).map(|n| n.start).max() else {
                         continue;
                     };
                     for n in input.iter().filter(|n| n.start == latest) {
@@ -591,7 +594,12 @@ mod tests {
         };
         let at = |t: Ticks, p: &str| (t, p.to_string());
         assert_eq!(gate("And"), [at(0, "C4"), at(0, "E4")]);
-        assert_eq!(gate("Notes not rhythm"), [at(PPQ, "D4")]);
+        assert_eq!(gate("Drop"), [at(PPQ, "D4")]);
+        // Replace: the latest notes on every hit, and nothing else.
+        assert_eq!(gate("Replace"), [at(0, "C4"), at(0, "E4"), at(2 * PPQ, "D4")]);
+        let replaced = run("rhythm_gate", &[("op", ParamValue::Text("Replace".into()))], vec![line(), rhythm()], 0, BAR);
+        assert!(replaced.iter().all(|n| n.duration == PPQ));
+        assert_eq!(replaced[0].velocity, pm_theory::Onset::ACCENT);
         // The empty hit on beat 3 repeats the latest notes, D4, with the hit's length and loudness.
         assert_eq!(gate("Or"), [at(0, "C4"), at(0, "E4"), at(PPQ, "D4"), at(2 * PPQ, "D4")]);
         assert_eq!(gate("Xor"), [at(PPQ, "D4"), at(2 * PPQ, "D4")]);

@@ -134,6 +134,20 @@ pub fn condition(node: &str, param: &str) -> Option<(&'static str, &'static [&'s
         .map(|&(_, _, on, values)| (on, values))
 }
 
+/// Nodes whose preview shows another output than their first: (node kind, output).
+static PREVIEW_OUTPUTS: &[(&str, &str)] = &[("polyrhythm", "both")];
+
+impl NodeSpec {
+    /// The output the node's preview shows (and plays).
+    pub fn preview_output(&self) -> usize {
+        PREVIEW_OUTPUTS
+            .iter()
+            .find(|(k, _)| *k == self.kind)
+            .and_then(|(_, name)| self.outputs.iter().position(|o| o.name == *name))
+            .unwrap_or(0)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ParamSpec {
     pub name: &'static str,
