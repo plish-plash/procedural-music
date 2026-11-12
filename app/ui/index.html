@@ -41,6 +41,13 @@
           <label class="menu-field" title="Follow the tempo and start/stop of MIDI clock from this input">Clock in
             <select id="clock-in-port"><option value="">Off</option></select>
           </label>
+          <label class="menu-field" title="Play notes and controllers from this input: into MIDI in nodes (in Perform mode), and into settings and recordings with the 🎹 and ⏺ buttons">MIDI in
+            <select id="note-in-port"><option value="">Off</option></select>
+          </label>
+          <label class="menu-field" title="How far ahead the engine works in Perform mode. Shorter hears the MIDI input sooner; raise it if heavy patches stutter.">Live lookahead (ms)
+            <input id="live-lookahead" type="number" min="5" max="150" step="1" value="20">
+          </label>
+          <div id="live-delay" class="menu-note"></div>
           <hr>
           <div class="menu-heading" title="Shifts everything sent to a port, so external synths line up with the built-in sound. Positive values send later.">Latency (ms)</div>
           <div id="midi-latency"></div>

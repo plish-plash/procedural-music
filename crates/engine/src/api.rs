@@ -7,7 +7,7 @@ use crate::engine::{Engine, LoopMode, MidiMessage};
 use crate::graph::{CompileReport, GraphDoc};
 use crate::json::Json;
 use crate::nodes::specs;
-use crate::spec::{ParamKind, PortSpec, PortType};
+use crate::spec::{ParamKind, ParamValue, PortSpec, PortType};
 
 /// Result of one command: the JSON reply and any MIDI to send right away.
 pub struct Reply {
@@ -166,6 +166,52 @@ pub fn handle(
             engine.set_midi_latency(ms);
             Ok(Reply::json(Json::Null))
         }
+        "set_mode" => {
+            engine.set_perform(args.get("perform") == Some(&Json::Bool(true)));
+            Ok(Reply::json(status_json(engine, now)))
+        }
+        "set_live_lookahead" => {
+            let ms = args.get("ms").and_then(Json::as_f64).ok_or("missing ms")?;
+            engine.set_live_lookahead(ms);
+            Ok(Reply::json(status_json(engine, now)))
+        }
+        "midi_in" => {
+            // {bytes: [0x90, 60, 100]}: as if played on the MIDI input.
+            let bytes: Vec<u8> = args
+                .get("bytes")
+                .map(Json::as_array)
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|b| b.as_f64().map(|b| b.clamp(0.0, 255.0) as u8))
+                .collect();
+            engine.midi_in(now, &bytes);
+            Ok(Reply::json(Json::Null))
+        }
+        "arm_capture" => {
+            let node = args.get("node").and_then(Json::as_str).ok_or("missing node")?;
+            let param = args.get("param").and_then(Json::as_str).ok_or("missing param")?;
+            engine.arm_capture(node, param)?;
+            Ok(Reply::json(status_json(engine, now)))
+        }
+        "finish_capture" => {
+            engine.finish_capture();
+            Ok(Reply::json(status_json(engine, now)))
+        }
+        "take_capture" => Ok(Reply::json(Json::Arr(
+            engine
+                .take_captured()
+                .into_iter()
+                .map(|c| {
+                    Json::obj(vec![
+                        ("node", Json::str(c.node)),
+                        (
+                            "params",
+                            Json::Obj(c.params.into_iter().map(|(k, v)| (k, param_json(v))).collect()),
+                        ),
+                    ])
+                })
+                .collect(),
+        ))),
         "status" => Ok(Reply::json(status_json(engine, now))),
         "report" => Ok(Reply::json(report_json(&engine.report()))),
         other => Err(format!("unknown command '{other}'")),
@@ -204,6 +250,20 @@ pub fn status_json(engine: &Engine, now: f64) -> Json {
         ("salt", Json::Num(engine.salt() as f64)),
         ("randomLocked", Json::Bool(engine.random_locked())),
         ("clockIn", Json::Bool(engine.following_clock())),
+        ("perform", Json::Bool(engine.performing())),
+        ("liveDelay", Json::Num((engine.live_delay() * 1000.0).round())),
+        (
+            "capture",
+            engine.capture_status().map_or(Json::Null, |(node, param, state, message)| {
+                Json::obj(vec![
+                    ("node", Json::str(node)),
+                    ("param", Json::str(param)),
+                    ("state", Json::str(state)),
+                    ("message", message.map_or(Json::Null, Json::str)),
+                ])
+            }),
+        ),
+        ("captureReady", Json::Num(engine.captured_ready() as f64)),
         ("clockBpm", engine.clock_bpm().map_or(Json::Null, Json::Num)),
         ("previewKey", Json::Num(engine.preview_key() as f64)),
         ("bar", Json::Num(bar as f64 + 1.0)),
@@ -226,6 +286,14 @@ pub fn status_json(engine: &Engine, now: f64) -> Json {
             ),
         ),
     ])
+}
+
+fn param_json(v: ParamValue) -> Json {
+    match v {
+        ParamValue::Number(n) => Json::Num(n),
+        ParamValue::Text(t) => Json::Str(t),
+        ParamValue::Bool(b) => Json::Bool(b),
+    }
 }
 
 fn port_json(p: &PortSpec) -> Json {
@@ -290,6 +358,12 @@ pub fn specs_json() -> Json {
                             ("kind", Json::str("pitchset")),
                             ("default", Json::str(default)),
                         ]),
+                        ParamKind::Data => {
+                            f.extend([("kind", Json::str("data")), ("default", Json::str(""))])
+                        }
+                    }
+                    if let Some(c) = crate::spec::capture(s.kind, p.name) {
+                        f.push(("capture", Json::str(c.name())));
                     }
                     if let Some((on, values)) = crate::spec::condition(s.kind, p.name) {
                         f.push((

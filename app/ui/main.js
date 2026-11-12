@@ -159,6 +159,7 @@ async function load(doc, path = null, isDirty = false) {
   $('clock-port').value = doc.clockPort ?? '';
   await api.call('set_clock_ports', { ports: doc.clockPort ? [doc.clockPort] : [] });
   await followClock(doc.clockInPort ?? '');
+  await playFrom(doc.noteInPort ?? '');
   showClock();
   timeline.focus = null;
   timeline.setSectionEdit(false);
@@ -190,6 +191,12 @@ async function refreshPorts() {
     clockIn.value = inputs.includes(following) ? following : '';
     clockIn.disabled = !inputs.length;
     clockIn.title = inputs.length ? '' : (api.inApp ? 'No MIDI input ports found' : 'MIDI input needs the desktop app');
+    const noteIn = $('note-in-port');
+    const playingIn = editor.doc.noteInPort ?? '';
+    noteIn.replaceChildren(new Option('Off', ''), new Option('All inputs', '*'), ...inputs.map((p) => new Option(p, p)));
+    noteIn.value = playingIn === '*' || inputs.includes(playingIn) ? playingIn : '';
+    noteIn.disabled = !inputs.length;
+    noteIn.title = clockIn.title;
     showLatency();
     await sendLatency();
     showClock();
@@ -199,13 +206,87 @@ async function refreshPorts() {
   }
 }
 
-/** Marks the MIDI menu button while clock out or clock in is on. */
+/** Marks the MIDI menu button while clock out, clock in or MIDI in is on. */
 function showClock() {
   const out = $('clock-port').value;
   const input = $('clock-in-port').value;
-  $('btn-midi').classList.toggle('on', !!(out || input));
-  const parts = [out && `clock out: ${out}`, input && `following clock from ${input}`].filter(Boolean);
-  $('btn-midi').title = parts.length ? `MIDI ${parts.join('; ')}` : 'MIDI clock, latency and ports';
+  const notes = $('note-in-port').value;
+  $('btn-midi').classList.toggle('on', !!(out || input || notes));
+  const parts = [
+    out && `clock out: ${out}`,
+    input && `following clock from ${input}`,
+    notes && `playing in from ${notes === '*' ? 'every input' : notes}`,
+  ].filter(Boolean);
+  $('btn-midi').title = parts.length ? `MIDI ${parts.join('; ')}` : 'MIDI clock, input, latency and ports';
+}
+
+/** Plays notes and controllers in from an input port ('' for none, '*' for every input). */
+async function playFrom(port) {
+  try {
+    await api.setMidiIn(port || null);
+    $('note-in-port').value = port;
+  } catch (e) {
+    $('note-in-port').value = '';
+    if (port) setStatus(`Couldn't play in from ${port === '*' ? 'the MIDI inputs' : port}: ${e.message ?? e}`);
+  }
+}
+
+// The live lookahead suits this computer, like latency, so it is kept in local storage.
+const LIVE_KEY = 'pm.liveLookahead';
+
+function savedLiveLookahead() {
+  try {
+    return Number(localStorage.getItem(LIVE_KEY)) || 20;
+  } catch {
+    return 20;
+  }
+}
+
+async function sendLiveLookahead() {
+  const ms = savedLiveLookahead();
+  $('live-lookahead').value = ms;
+  await api.call('set_live_lookahead', { ms });
+}
+
+// ---- Playing settings in from the MIDI input -------------------------------------
+
+const CAPTURE_HINTS = {
+  chord: 'Play a chord on the MIDI input',
+  chords: 'Play chords on the MIDI input, one after another; click 🎹 again when done',
+  scale: 'Play the scale on the MIDI input, starting on its root; it is taken after a pause',
+  degrees: 'Play the melody on the MIDI input; it is taken after a two-second pause',
+  record: 'Recording starts where the loop does, while playing',
+};
+let captureMessage = null;
+
+/** Starts setting a parameter from the MIDI input, or (on its own button again) finishes. */
+async function toggleCapture(node, param) {
+  try {
+    if (pushTimer) {
+      clearTimeout(pushTimer);
+      await pushGraph();
+    }
+    const c = status?.capture;
+    const again = c && c.node === node && c.param === param;
+    const s = again ? await api.call('finish_capture') : await api.call('arm_capture', { node, param });
+    status = s;
+    editor.setCapture(s.capture);
+    await takeCaptures();
+    if (!again) {
+      const kind = Object.values(editor.specs).flatMap((sp) => sp.params).find((p) => p.name === param && p.capture)?.capture;
+      const noInput = !$('note-in-port').value;
+      setStatus(noInput ? 'Choose a MIDI in port in the MIDI menu first' : CAPTURE_HINTS[kind] ?? 'Play on the MIDI input', !noInput);
+    }
+  } catch (e) {
+    setStatus(`Can't play that in: ${e.message ?? e}`);
+  }
+}
+
+/** Applies settings the engine captured from the MIDI input. */
+async function takeCaptures() {
+  const captured = await api.call('take_capture');
+  for (const c of captured) editor.applyCapture(c.node, c.params);
+  if (captured.length) setStatus('Set from the MIDI input', true);
 }
 
 /** Follows MIDI clock from an input port ('' for none). */
@@ -427,6 +508,12 @@ async function pollStatus() {
     timeline.setStatus(s);
     updateCueBar(s);
     showRandom(s);
+    editor.setCapture(s.capture);
+    if (s.captureReady) await takeCaptures();
+    const message = s.capture?.message ?? null;
+    if (message && message !== captureMessage) setStatus(message);
+    captureMessage = message;
+    $('live-delay').textContent = `In Perform mode, notes played in sound ${s.liveDelay} ms later (plus the audio buffer).`;
     // New previews when they'd show something else: a background counterpoint solve
     // finished, the playhead moved into another block, section or lap, or the salt changed.
     const solved = s.solveGeneration !== solveGeneration;
@@ -474,6 +561,8 @@ async function setMode(m) {
   } else {
     await setLoop(timeline.loop);
   }
+  // Perform mode plays the MIDI in nodes, with the short live lookahead.
+  await api.call('set_mode', { perform: m === 'perform' });
   buildCueBar();
   await pushGraph();
   requestAnimationFrame(() => editor.updateWires());
@@ -627,6 +716,7 @@ async function init() {
     onProbe: probe,
     onSelect: (flats) => timeline?.setHighlight(flats),
     onCaptureSeed: (node) => api.call('capture_seed', { node }).then((r) => r.seed).catch(() => null),
+    onCapture: toggleCapture,
   });
   inspector = new Inspector({ root: $('inspector'), editor, onLibrarySave: saveToLibrary });
   editor.inspector = inspector;
@@ -662,6 +752,7 @@ async function init() {
   });
 
   await refreshPorts();
+  await sendLiveLookahead();
   await refreshLibrary();
 
   let saved = null;
@@ -700,6 +791,21 @@ async function init() {
     editor.doc.clockInPort = $('clock-in-port').value || undefined;
     showClock();
     onChange({ graph: false });
+  });
+  $('note-in-port').addEventListener('change', async () => {
+    await playFrom($('note-in-port').value);
+    editor.doc.noteInPort = $('note-in-port').value || undefined;
+    showClock();
+    onChange({ graph: false });
+  });
+  $('live-lookahead').addEventListener('change', async () => {
+    const ms = Math.max(5, Math.min(150, Math.round(Number($('live-lookahead').value) || 20)));
+    try {
+      localStorage.setItem(LIVE_KEY, String(ms));
+    } catch {
+      /* storage unavailable: applies until the app closes */
+    }
+    await sendLiveLookahead();
   });
 
   document.addEventListener('keydown', (e) => {

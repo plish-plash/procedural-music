@@ -14,6 +14,7 @@ pub mod control;
 mod engine;
 mod graph;
 pub mod json;
+pub mod live;
 mod nodes;
 pub mod offline;
 pub mod project;

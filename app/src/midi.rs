@@ -1,5 +1,5 @@
 //! MIDI ports (WinMM on Windows, CoreMIDI on macOS, ALSA on Linux): outputs for notes and
-//! clock, and one input for following an external clock.
+//! clock, and inputs for following an external clock and for playing notes and controls.
 
 use std::collections::{HashMap, HashSet};
 
@@ -15,12 +15,13 @@ pub fn input_names() -> Vec<String> {
     }
 }
 
-/// Opens an input port and calls `on_realtime` with each clock, start, continue or stop
-/// byte it receives (other messages are ignored). The port stays open while the
-/// connection is kept.
-pub fn listen_clock(
+/// Opens an input port and calls `on_message` with each message it receives (clock and
+/// transport bytes included; sysex and active sensing are dropped). The port stays open
+/// while the connection is kept. A port can only be opened once, so one connection
+/// serves both clock and notes.
+pub fn listen(
     name: &str,
-    mut on_realtime: impl FnMut(u8) + Send + 'static,
+    mut on_message: impl FnMut(&[u8]) + Send + 'static,
 ) -> Result<MidiInputConnection<()>, String> {
     let mut input = MidiInput::new(CLIENT).map_err(|e| e.to_string())?;
     // Clock is a timing message, which midir can drop; keep it.
@@ -31,18 +32,7 @@ pub fn listen_clock(
         .find(|p| input.port_name(p).ok().as_deref() == Some(name))
         .ok_or_else(|| format!("MIDI input '{name}' not found"))?;
     input
-        .connect(
-            &port,
-            "clock-in",
-            move |_, bytes, _| {
-                for &b in bytes {
-                    if matches!(b, 0xf8 | 0xfa | 0xfb | 0xfc) {
-                        on_realtime(b);
-                    }
-                }
-            },
-            (),
-        )
+        .connect(&port, "in", move |_, bytes, _| on_message(bytes), ())
         .map_err(|e| format!("couldn't open '{name}': {e} (is another program using it?)"))
 }
 

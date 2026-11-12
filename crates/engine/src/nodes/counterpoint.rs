@@ -400,6 +400,7 @@ impl NodeImpl for CounterpointNode {
                         pitch: pitch.with_spelling(key.spell_pc(pitch.pitch_class())),
                         velocity: self.velocity,
                         voice: voice_map[slot.voice] as u8,
+                        held: 0,
                     });
                 }
             }

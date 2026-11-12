@@ -525,7 +525,7 @@ mod tests {
     const BAR: Ticks = PPQ * 4;
 
     fn note(start: Ticks, pitch: &str) -> Note {
-        Note { start, duration: 100, pitch: Pitch::parse(pitch).unwrap(), velocity: 100, voice: 0 }
+        Note { start, duration: 100, pitch: Pitch::parse(pitch).unwrap(), velocity: 100, voice: 0, held: 0 }
     }
 
     fn run(kind: &str, params: &[(&str, ParamValue)], ins: Vec<Option<Value>>, start: Ticks, end: Ticks) -> Vec<Note> {

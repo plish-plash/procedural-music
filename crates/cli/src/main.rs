@@ -323,6 +323,7 @@ fn render_midi(pads: &Progression, loops: u32, bpm: f64) -> Vec<u8> {
                     pitch,
                     velocity: 70,
                     voice: v as u8,
+                    held: 0,
                 };
                 pad_track.note(0, &note);
             }
@@ -345,6 +346,7 @@ fn render_midi(pads: &Progression, loops: u32, bpm: f64) -> Vec<u8> {
                 pitch,
                 velocity: onset.velocity,
                 voice: 0,
+                held: 0,
             };
             bass_track.note(1, &note);
         }
@@ -367,6 +369,7 @@ fn render_midi(pads: &Progression, loops: u32, bpm: f64) -> Vec<u8> {
                 pitch: Pitch::midi(key),
                 velocity: onset.velocity,
                 voice: 0,
+                held: 0,
             };
             drum_track.note(9, &note);
         });

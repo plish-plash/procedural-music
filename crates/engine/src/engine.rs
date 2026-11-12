@@ -15,15 +15,18 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 
 use pm_synth::{AudioMsg, ModuleKind, NoteEvent, RackDesc, TimedEvent, TimedSet};
-use pm_theory::{Meter, Note, Ticks, PPQ};
+use pm_theory::{Chord, Meter, Note, Pitch, Spelling, Ticks, PPQ};
 
 use crate::audition;
 use crate::graph::{
     describe, section_key, value_view, CompileReport, EvalContext, Graph, GraphDoc, SinkOutput,
 };
 use crate::json::Json;
-use crate::nodes::{ControlMessage, Sink};
+use crate::live::{LiveCtx, LiveInput, Message};
+use crate::nodes::input::encode_recorded;
+use crate::nodes::{degree_in, ControlMessage, Sink};
 use crate::rng;
+use crate::spec::{Capture, ParamValue, Params};
 use crate::value::Value;
 
 /// Port name meaning "the first MIDI port the app finds".
@@ -111,12 +114,55 @@ struct ClockIn {
 /// already late (Play and clock pulses use the same).
 const START_DELAY: f64 = 0.05;
 
+/// Evaluation slice in Perform mode: short, so live input is heard soon.
+const LIVE_SLICE: Ticks = PPQ / 32;
+
+/// How long the MIDI input stays quiet before a capture of notes played in turn ends.
+const CAPTURE_PAUSE: f64 = 2.0;
+
+/// Keys pressed this close together (in seconds) count as one chord when capturing degrees.
+const CHORD_SPREAD: f64 = 0.04;
+
+/// A note from a held key, sounding until the key is released.
+#[derive(Clone, Debug)]
+enum Sounding {
+    Midi { port: String, channel: u8, key: u8 },
+    Instrument { module: u64, id: u64 },
+}
+
+/// Playing on the MIDI input to set one of a node's settings (see [`Capture`]).
+struct CaptureState {
+    node: String,
+    param: String,
+    kind: Capture,
+    /// The keys of the chord being played, or the notes played in turn.
+    keys: Vec<u8>,
+    /// When the last key went down.
+    last: f64,
+    /// Chord symbols captured so far (for a progression).
+    text: String,
+    /// Recording: the node's loop length, and the play tick where the pass starts.
+    length: Ticks,
+    start: Option<Ticks>,
+    /// Recording: (key, velocity, start in the pass, duration once released).
+    notes: Vec<(u8, u8, Ticks, Option<Ticks>)>,
+    /// Why the last attempt set nothing.
+    message: Option<String>,
+}
+
+/// Settings captured from the MIDI input, for the editor to apply.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Captured {
+    pub node: String,
+    pub params: Vec<(String, ParamValue)>,
+}
+
 /// What the editor's previews evaluate (see [`Engine::preview_target`]).
-struct PreviewTarget {
+struct PreviewTarget<'a> {
     /// Which of the song's graphs (its section's overrides).
     graph: usize,
     /// The preview window, section and salt.
-    ctx: EvalContext,
+    ctx: EvalContext<'a>,
     /// The section-local tick of interest (the playhead): automation is shown as it is here.
     focus: Ticks,
     bpm: f64,
@@ -346,6 +392,18 @@ pub struct Engine {
     pub lookahead: f64,
     /// Size of each evaluation window in ticks. Graph edits take effect at the next window.
     pub slice: Ticks,
+    /// Perform mode: live input nodes play, scheduled with `live_lookahead` and
+    /// [`LIVE_SLICE`] instead of `lookahead` and `slice`.
+    perform: bool,
+    /// The lookahead in Perform mode, in seconds: shorter hears the MIDI input sooner,
+    /// longer leaves more room for heavy patches.
+    live_lookahead: f64,
+    live: LiveInput,
+    /// Notes from keys still held, by tag (see `Note::held`).
+    sounding: HashMap<u16, Vec<Sounding>>,
+    capture: Option<CaptureState>,
+    /// Finished captures, until the editor takes them.
+    captured: Vec<Captured>,
 }
 
 impl Default for Engine {
@@ -392,6 +450,12 @@ impl Engine {
             quantize_edits: false,
             lookahead: 0.12,
             slice: PPQ / 4,
+            perform: false,
+            live_lookahead: 0.02,
+            live: LiveInput::default(),
+            sounding: HashMap::new(),
+            capture: None,
+            captured: Vec::new(),
         }
     }
 
@@ -488,9 +552,9 @@ impl Engine {
     /// What the previews show: what's playing (the 4-bar block under the playhead, in
     /// its section and lap), or when stopped, where Play will start, with the salt last
     /// played (or rerolled since).
-    fn preview_target(&self, song: &Song) -> PreviewTarget {
+    fn preview_target(&self, song: &Song) -> PreviewTarget<'_> {
+        let p = if self.playing { self.playhead(self.now) as Ticks } else { 0 };
         let (tick, lap) = if self.playing {
-            let p = self.playhead(self.now) as Ticks;
             self.transport.map(p).unwrap_or((self.song.length.saturating_sub(1), 0))
         } else {
             (self.cursor, 0)
@@ -514,23 +578,31 @@ impl Engine {
                 sync: self.synchronous,
                 section: key,
                 repeat,
+                live: self.live_ctx(p as i64 - local as i64),
                 ..EvalContext::new(start, start + window, self.meter, self.section_salt(section, lap))
             },
         }
     }
 
+    /// The live input for an evaluation whose tick 0 is play tick `offset`, while performing.
+    fn live_ctx(&self, offset: i64) -> Option<LiveCtx<'_>> {
+        self.perform.then_some(LiveCtx { input: &self.live, offset })
+    }
+
     /// Identifies what the previews show: it changes when the playhead enters another
-    /// block, section or lap, the salt changes, or (with automation, which moves within a
-    /// block) on every beat.
+    /// block, section or lap, the salt changes, (with automation, which moves within a
+    /// block) on every beat, or (with live input, while performing) as it is played.
     pub fn preview_key(&self) -> u64 {
         let song = self.pending_song.as_ref().unwrap_or(&self.song);
         let t = self.preview_target(song);
-        let beat = if song.graphs[t.graph].is_automated() && self.playing {
+        let graph = &song.graphs[t.graph];
+        let beat = if graph.is_automated() && self.playing {
             t.focus / PPQ
         } else {
             0
         };
-        rng::hash(&[t.graph as u64, t.ctx.section, t.ctx.repeat as u64, t.ctx.start as u64, t.ctx.salt, beat as u64])
+        let live = if graph.is_live() && self.perform { self.live.generation } else { 0 };
+        rng::hash(&[t.graph as u64, t.ctx.section, t.ctx.repeat as u64, t.ctx.start as u64, t.ctx.salt, beat as u64, live])
             & 0xffff_ffff
     }
 
@@ -758,6 +830,369 @@ impl Engine {
         }
     }
 
+    // ---- Live input --------------------------------------------------------------
+
+    /// Perform mode: live input nodes play, with the live lookahead. Takes effect from
+    /// the next evaluation window.
+    pub fn set_perform(&mut self, on: bool) {
+        self.perform = on;
+    }
+
+    pub fn performing(&self) -> bool {
+        self.perform
+    }
+
+    /// The lookahead in Perform mode, in milliseconds (clamped to 5–150).
+    pub fn set_live_lookahead(&mut self, ms: f64) {
+        if ms.is_finite() {
+            self.live_lookahead = ms.clamp(5.0, 150.0) / 1000.0;
+        }
+    }
+
+    /// How late the MIDI input is heard through the graph while performing, in seconds
+    /// (at the current tempo).
+    pub fn live_delay(&self) -> f64 {
+        let bpm = self.tempo.last().map_or(self.bpm, |t| t.bpm);
+        self.live_lookahead + LIVE_SLICE as f64 * 60.0 / (bpm * PPQ as f64)
+    }
+
+    fn current_lookahead(&self) -> f64 {
+        if self.perform {
+            self.live_lookahead
+        } else {
+            self.lookahead
+        }
+    }
+
+    fn current_slice(&self) -> Ticks {
+        if self.perform {
+            LIVE_SLICE
+        } else {
+            self.slice
+        }
+    }
+
+    /// The play tick a key pressed or released now sounds at: a constant delay (the
+    /// lookahead and one slice) puts it in a window that hasn't been evaluated yet.
+    fn live_tick(&self, now: f64) -> Ticks {
+        let t = self.playhead(now + self.current_lookahead()) as Ticks + self.current_slice();
+        t.max(self.scheduled_until)
+    }
+
+    /// One message from the MIDI input (notes and controllers; others are ignored).
+    pub fn midi_in(&mut self, now: f64, bytes: &[u8]) {
+        self.now = now;
+        let Some(message) = Message::parse(bytes) else {
+            return;
+        };
+        match message {
+            Message::NoteOn { channel, key, velocity } => {
+                self.live.press(channel, key, velocity);
+                if self.playing && self.perform {
+                    let tick = self.live_tick(now);
+                    self.live.place(channel, key, velocity, tick);
+                }
+                self.capture_press(now, key, velocity);
+            }
+            Message::NoteOff { channel, key } => {
+                self.live.release(channel, key);
+                if self.playing {
+                    let tick = self.live_tick(now);
+                    if let Some((tag, off)) = self.live.place_off(channel, key, tick) {
+                        self.end_held(tag, off);
+                    }
+                }
+                self.capture_release(now, key);
+            }
+            Message::Cc { channel, cc, value } => self.live.set_cc(channel, cc, value),
+        }
+    }
+
+    /// Lets go of every key (when the MIDI input changes).
+    pub fn release_live(&mut self, now: f64) {
+        let tick = self.live_tick(now);
+        let tags: Vec<u16> = self.sounding.keys().copied().collect();
+        for tag in tags {
+            self.end_held(tag, tick);
+        }
+        self.live.release_all();
+    }
+
+    // ---- Capture -------------------------------------------------------------------
+
+    /// A node's settings as the editor shows them (with the focused section's overrides).
+    fn node_params(&self, node: &str) -> Option<(&'static crate::NodeSpec, HashMap<String, ParamValue>)> {
+        let n = self.doc.nodes.iter().find(|n| n.id == node)?;
+        let spec = crate::nodes::spec_for(&n.kind)?;
+        let mut params = n.params.clone();
+        if let Some(s) = self.focus.and_then(|f| self.doc.sections.get(f)) {
+            for (id, param, value) in &s.overrides {
+                if id == node {
+                    params.insert(param.clone(), value.clone());
+                }
+            }
+        }
+        Some((spec, params))
+    }
+
+    /// Starts setting `param` of `node` from what is played on the MIDI input (see
+    /// [`Capture`]). Replaces any capture in progress.
+    pub fn arm_capture(&mut self, node: &str, param: &str) -> Result<(), String> {
+        let (spec, values) = self.node_params(node).ok_or_else(|| format!("no node '{node}'"))?;
+        let kind = crate::spec::capture(spec.kind, param)
+            .ok_or_else(|| format!("{} can't be played in", param))?;
+        let p = Params::new(spec, &values);
+        let text = if kind == Capture::Chords && p.text("notation") == "Chord symbols" {
+            p.text("chords").trim().to_string()
+        } else {
+            String::new()
+        };
+        let length = if kind == Capture::Record {
+            p.int("bars").max(1) as Ticks * self.meter.ticks_per_bar()
+        } else {
+            0
+        };
+        self.capture = Some(CaptureState {
+            node: node.to_string(),
+            param: param.to_string(),
+            kind,
+            keys: Vec::new(),
+            last: self.now,
+            text,
+            length,
+            start: None,
+            notes: Vec::new(),
+            message: None,
+        });
+        Ok(())
+    }
+
+    /// Ends the capture, keeping what was played so far (notes in turn, or a
+    /// recording's partial pass).
+    pub fn finish_capture(&mut self) {
+        let Some(c) = self.capture.take() else {
+            return;
+        };
+        match c.kind {
+            Capture::Scale | Capture::Degrees if !c.keys.is_empty() => self.finish_notes(c),
+            Capture::Record if c.start.is_some() => self.finish_recording(c),
+            _ => {}
+        }
+    }
+
+    /// Captures that have finished since the last call, for the editor to apply.
+    pub fn take_captured(&mut self) -> Vec<Captured> {
+        std::mem::take(&mut self.captured)
+    }
+
+    pub fn captured_ready(&self) -> usize {
+        self.captured.len()
+    }
+
+    /// The capture in progress: (node, setting, state, message), where the state is
+    /// "armed", or for a recording "waiting" (for its loop to start, while playing) or
+    /// "recording".
+    pub fn capture_status(&self) -> Option<(&str, &str, &'static str, Option<&str>)> {
+        let c = self.capture.as_ref()?;
+        let state = match (c.kind, c.start) {
+            (Capture::Record, Some(s)) if self.playing && self.playhead(self.now) >= s as f64 => "recording",
+            (Capture::Record, _) => "waiting",
+            _ => "armed",
+        };
+        Some((&c.node, &c.param, state, c.message.as_deref()))
+    }
+
+    fn capture_press(&mut self, now: f64, key: u8, velocity: u8) {
+        let playhead = self.playhead(now) as i64;
+        let Some(c) = self.capture.as_mut() else {
+            return;
+        };
+        match c.kind {
+            Capture::Chord | Capture::Chords | Capture::Scale => {
+                if !c.keys.contains(&key) {
+                    c.keys.push(key);
+                }
+            }
+            Capture::Degrees => match c.keys.last_mut() {
+                // Keys struck together: keep the top one.
+                Some(last) if now - c.last < CHORD_SPREAD => *last = (*last).max(key),
+                _ => c.keys.push(key),
+            },
+            Capture::Record => {
+                if let Some(start) = c.start {
+                    // A little early still counts as the downbeat.
+                    let at = playhead - start as i64;
+                    if at >= -((PPQ / 8) as i64) && at < c.length as i64 {
+                        c.notes.push((key, velocity, at.max(0) as Ticks, None));
+                    }
+                }
+            }
+        }
+        c.last = now;
+    }
+
+    fn capture_release(&mut self, now: f64, key: u8) {
+        let playhead = self.playhead(now) as i64;
+        let idle = self.live.idle();
+        let Some(c) = self.capture.as_mut() else {
+            return;
+        };
+        match c.kind {
+            Capture::Chord | Capture::Chords if idle && !c.keys.is_empty() => self.finish_chord(),
+            Capture::Record => {
+                let start = c.start.map_or(0, |s| s as i64);
+                if let Some(n) = c.notes.iter_mut().rev().find(|n| n.0 == key && n.3.is_none()) {
+                    n.3 = Some(((playhead - start) as Ticks).saturating_sub(n.2).max(1));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Ends captures of notes played in turn after a pause, and starts and ends
+    /// recordings with the node's loop.
+    fn tick_capture(&mut self, now: f64) {
+        if self.capture.is_none() {
+            return;
+        }
+        let (playhead, local) = if self.playing {
+            let pos = self.position(now);
+            (Some(self.playhead(now) as Ticks), pos.local)
+        } else {
+            (None, 0)
+        };
+        let Some(c) = self.capture.as_mut() else {
+            return;
+        };
+        match c.kind {
+            Capture::Scale | Capture::Degrees if !c.keys.is_empty() && now - c.last > CAPTURE_PAUSE => {
+                let c = self.capture.take().expect("checked");
+                self.finish_notes(c);
+            }
+            Capture::Record => {
+                let Some(p) = playhead else { return };
+                match c.start {
+                    None => {
+                        // The next time the node's loop comes round, in section time.
+                        let len = c.length.max(1);
+                        c.start = Some(p + (local.div_ceil(len) * len - local));
+                    }
+                    Some(s) if p >= s + c.length => {
+                        let c = self.capture.take().expect("checked");
+                        self.finish_recording(c);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The chord just played: a symbol for a Chord node (then done), or one more for a
+    /// progression (which keeps listening).
+    fn finish_chord(&mut self) {
+        let Some(c) = self.capture.as_mut() else {
+            return;
+        };
+        let mut keys = std::mem::take(&mut c.keys);
+        keys.sort_unstable();
+        let pitches: Vec<Pitch> = keys.iter().map(|&k| Pitch::midi(k as i32)).collect();
+        let Some(name) = Chord::from_pitches(&pitches).ok().and_then(|ch| ch.name()) else {
+            let names: Vec<String> = pitches.iter().map(|p| p.to_string()).collect();
+            c.message = Some(format!("{} isn't a chord I know", names.join(" ")));
+            return;
+        };
+        c.message = None;
+        let symbol = name.to_string();
+        let params = if c.kind == Capture::Chord {
+            let root = keys.iter().find(|&&k| k % 12 == name.root.pc()).copied().unwrap_or(keys[0]);
+            let node = c.node.clone();
+            self.capture = None;
+            Captured {
+                node,
+                params: vec![
+                    ("symbol".into(), ParamValue::Text(symbol)),
+                    ("octave".into(), ParamValue::Number((root / 12) as f64 - 1.0)),
+                ],
+            }
+        } else {
+            if !c.text.is_empty() {
+                c.text.push(' ');
+            }
+            c.text.push_str(&symbol);
+            Captured {
+                node: c.node.clone(),
+                params: vec![
+                    ("chords".into(), ParamValue::Text(c.text.clone())),
+                    ("notation".into(), ParamValue::Text("Chord symbols".into())),
+                ],
+            }
+        };
+        self.captured.push(params);
+    }
+
+    /// Notes played in turn: a custom scale on the first, or scale degrees.
+    fn finish_notes(&mut self, c: CaptureState) {
+        let params = match c.kind {
+            Capture::Scale => {
+                let root = c.keys[0] % 12;
+                let mut pcs: Vec<u8> = c.keys.iter().map(|k| (k % 12 + 12 - root) % 12).collect();
+                pcs.sort_unstable();
+                pcs.dedup();
+                let names: Vec<String> =
+                    pcs.iter().map(|pc| Spelling::key_default((pc + root) % 12).to_string()).collect();
+                vec![
+                    ("root".into(), ParamValue::Text(Spelling::key_default(root).to_string())),
+                    ("scale".into(), ParamValue::Text("Custom".into())),
+                    ("notes".into(), ParamValue::Text(names.join(" "))),
+                ]
+            }
+            _ => match self.degrees_of(&c.node, &c.keys) {
+                Ok(text) => vec![(c.param.clone(), ParamValue::Text(text))],
+                Err(message) => {
+                    self.capture = Some(CaptureState { message: Some(message), keys: Vec::new(), ..c });
+                    return;
+                }
+            },
+        };
+        self.captured.push(Captured { node: c.node, params });
+    }
+
+    /// Keys as scale degrees ("1 3 -2") in the scale reaching the node's Scale input,
+    /// counted from the root in its Octave.
+    fn degrees_of(&self, node: &str, keys: &[u8]) -> Result<String, String> {
+        let song = self.pending_song.as_ref().unwrap_or(&self.song);
+        let t = self.preview_target(song);
+        let scale = match song.graphs[t.graph].input_value(node, "scale", &t.ctx, t.focus)? {
+            Value::Scale(s) => *s.at(t.focus).value,
+            _ => return Err("no scale".into()),
+        };
+        let octave = song.graphs[t.graph].param_number(node, "octave").unwrap_or(4.0) as i32;
+        let degrees: Vec<String> = keys
+            .iter()
+            .filter_map(|&k| degree_in(&scale, Pitch::midi(k as i32), octave))
+            .map(|d| (if d >= 0 { d + 1 } else { d }).to_string())
+            .collect();
+        Ok(degrees.join(" "))
+    }
+
+    /// A recorded pass: notes still held end with it.
+    fn finish_recording(&mut self, c: CaptureState) {
+        let mut notes: Vec<(Ticks, Ticks, u8, u8)> = c
+            .notes
+            .iter()
+            .map(|&(key, velocity, start, duration)| {
+                let duration = duration.unwrap_or(c.length.saturating_sub(start)).max(1);
+                (start, duration, key, velocity)
+            })
+            .collect();
+        notes.sort_unstable();
+        self.captured.push(Captured {
+            node: c.node,
+            params: vec![("notes".into(), ParamValue::Text(encode_recorded(&notes)))],
+        });
+    }
+
     fn tempo_at_time(&self, now: f64) -> Option<&TempoPoint> {
         let i = self.tempo.partition_point(|t| t.time <= now);
         self.tempo.get(i.saturating_sub(1))
@@ -937,6 +1372,9 @@ impl Engine {
         self.end_at = None;
         self.cue = None;
         self.controls_sent.clear();
+        // Play ticks start again from 0.
+        self.live.clear_notes();
+        self.sounding.clear();
         self.transport = self.make_transport(self.cursor, 0);
         let first = self.song.locate(self.transport.from);
         let bpm = self.clock_bpm().unwrap_or_else(|| self.section_bpm(first));
@@ -983,6 +1421,12 @@ impl Engine {
         if let Some(song) = self.pending_song.take() {
             self.install(song);
         }
+        // A recording in progress keeps what was played.
+        if self.capture.as_ref().is_some_and(|c| c.kind == Capture::Record && c.start.is_some()) {
+            self.finish_capture();
+        }
+        self.live.clear_notes();
+        self.sounding.clear();
         if !self.playing && self.active.is_empty() {
             return out;
         }
@@ -1046,14 +1490,18 @@ impl Engine {
             if ((self.scheduled_until + 2 * bar) as f64) < playhead {
                 self.scheduled_until = (playhead as Ticks / bar) * bar;
             }
-            let horizon = self.playhead(now + self.lookahead) as Ticks;
+            let horizon = self.playhead(now + self.current_lookahead()) as Ticks;
+            let slice = self.current_slice();
             while self.scheduled_until < horizon && self.end_at.is_none() {
                 let start = self.scheduled_until;
-                self.schedule_window(start);
-                self.scheduled_until = start + self.slice;
+                // Windows end on the slice grid, so they stay in step when the slice changes.
+                let end = (start / slice + 1) * slice;
+                self.schedule_window(start, end - start);
+                self.scheduled_until = end;
             }
             self.prune_tempo(now);
         }
+        self.tick_capture(now);
         let mut out = Vec::new();
         while self.queue.peek().is_some_and(|p| p.at <= now) {
             let p = self.queue.pop().expect("peeked");
@@ -1074,8 +1522,8 @@ impl Engine {
         self.queue.peek().map(|p| (p.at - now).max(0.0))
     }
 
-    /// Evaluates one slice starting at play tick `p` and queues what it produces.
-    fn schedule_window(&mut self, p: Ticks) {
+    /// Evaluates `len` ticks starting at play tick `p` and queues what they produce.
+    fn schedule_window(&mut self, p: Ticks, len: Ticks) {
         let bar = self.meter.ticks_per_bar();
         if p.is_multiple_of(bar) {
             if let Some(song) = self.pending_song.take() {
@@ -1119,7 +1567,8 @@ impl Engine {
             sync: self.synchronous,
             section: key,
             repeat,
-            ..EvalContext::new(local, local + self.slice, self.meter, salt)
+            live: self.live_ctx(p as i64 - local as i64),
+            ..EvalContext::new(local, local + len, self.meter, salt)
         };
         let (sinks, modules) = self.song.graphs[graph].evaluate_window(&ctx);
         // Automated sound settings go to the rack when they change.
@@ -1138,7 +1587,7 @@ impl Engine {
         }
         let pulse = PPQ / 24;
         let mut t = p.div_ceil(pulse) * pulse;
-        while t < p + self.slice {
+        while t < p + len {
             for port in self.clock_ports.clone() {
                 self.push(
                     self.time_of(t),
@@ -1218,8 +1667,18 @@ impl Engine {
             Sink::Instrument => {
                 for note in sink.notes {
                     let (on, off) = (self.time_of(note.start), self.time_of(note.end()));
-                    let events = self.instrument_events(sink.module, &note, on, off);
-                    self.audio_events.extend(events);
+                    let id = self.next_note_id;
+                    let [on, off] = self.instrument_events(sink.module, &note, on, off);
+                    self.audio_events.push(on);
+                    if note.held == 0 {
+                        self.audio_events.push(off);
+                    } else {
+                        // Ends when its key is released (see `end_held`).
+                        self.sounding
+                            .entry(note.held)
+                            .or_default()
+                            .push(Sounding::Instrument { module: sink.module, id });
+                    }
                 }
                 return;
             }
@@ -1241,7 +1700,32 @@ impl Engine {
                     velocity,
                 },
             );
-            self.push(self.time_of(note.end()), Event::Off { port, channel, key });
+            if note.held == 0 {
+                self.push(self.time_of(note.end()), Event::Off { port, channel, key });
+            } else {
+                self.sounding
+                    .entry(note.held)
+                    .or_default()
+                    .push(Sounding::Midi { port, channel, key });
+            }
+        }
+    }
+
+    /// Ends the notes of a released key at play tick `off`.
+    fn end_held(&mut self, tag: u16, off: Ticks) {
+        let Some(sounding) = self.sounding.remove(&tag) else {
+            return;
+        };
+        let at = self.time_of(off);
+        for s in sounding {
+            match s {
+                Sounding::Midi { port, channel, key } => self.push(at, Event::Off { port, channel, key }),
+                Sounding::Instrument { module, id } => self.audio_events.push(TimedEvent {
+                    at,
+                    module,
+                    event: NoteEvent::Off { id },
+                }),
+            }
         }
     }
 
@@ -1918,5 +2402,250 @@ mod tests {
         assert_ne!(e.preview_key(), playing);
         let text = e.report().previews.into_iter().find(|p| p.0 == "w").unwrap().1;
         assert!(text.contains("bars 5–8"), "{text}");
+    }
+
+    // ---- Live input --------------------------------------------------------------
+
+    fn node(id: &str, kind: &str, params: &[(&str, ParamValue)]) -> NodeDoc {
+        NodeDoc {
+            id: id.into(),
+            kind: kind.into(),
+            params: params.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
+        }
+    }
+
+    fn wire(from: &str, out: &str, to: &str, input: &str) -> WireDoc {
+        WireDoc { from_node: from.into(), from_port: out.into(), to_node: to.into(), to_port: input.into() }
+    }
+
+    fn text(s: &str) -> ParamValue {
+        ParamValue::Text(s.into())
+    }
+
+    /// Like `run`, from `from` (the engine's clock keeps going between calls).
+    fn run_from(engine: &mut Engine, from: f64, until: f64) -> Vec<(f64, Vec<u8>)> {
+        let mut sent = Vec::new();
+        let mut now = from;
+        while now < until {
+            for m in engine.poll(now) {
+                sent.push((now, m.bytes));
+            }
+            now += 0.001;
+        }
+        sent
+    }
+
+    fn live_doc() -> GraphDoc {
+        GraphDoc {
+            nodes: vec![node("m", "midi_in", &[]), node("o", "midi_out", &[])],
+            wires: vec![wire("m", "notes", "o", "notes")],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn live_notes_play_after_the_live_delay_and_end_on_release() {
+        let mut e = Engine::new();
+        e.set_graph(&live_doc());
+        e.set_bpm(0.0, 120.0);
+        e.set_perform(true);
+        e.set_live_lookahead(20.0);
+        let delay = e.live_delay();
+        // 20 ms plus a 1/32 beat at 120 bpm.
+        assert!((delay - (0.02 + 0.5 / 32.0)).abs() < 1e-9, "{delay}");
+        e.play(0.0, 1);
+        run_from(&mut e, 0.0, 1.0);
+        e.midi_in(1.0, &[0x90, 60, 100]);
+        let sent = run_from(&mut e, 1.0, 1.5);
+        let on: Vec<f64> = sent.iter().filter(|(_, b)| b == &[0x90, 60, 100]).map(|(t, _)| *t).collect();
+        assert_eq!(on.len(), 1, "{sent:?}");
+        assert!((on[0] - (1.0 + delay)).abs() < 0.003, "{on:?}");
+        assert!(!sent.iter().any(|(_, b)| b[0] == 0x80), "held: no note-off yet");
+        e.midi_in(1.5, &[0x80, 60, 0]);
+        let sent = run_from(&mut e, 1.5, 2.0);
+        let off: Vec<f64> = sent.iter().filter(|(_, b)| b[0] == 0x80).map(|(t, _)| *t).collect();
+        assert_eq!(off.len(), 1, "{sent:?}");
+        assert!((off[0] - (1.5 + delay)).abs() < 0.003, "{off:?}");
+        // A longer lookahead hears the input later.
+        e.set_live_lookahead(50.0);
+        assert!((e.live_delay() - delay - 0.03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stop_ends_held_live_notes() {
+        let mut e = Engine::new();
+        e.set_graph(&live_doc());
+        e.set_perform(true);
+        e.play(0.0, 1);
+        e.midi_in(0.5, &[0x90, 64, 100]);
+        run_from(&mut e, 0.0, 1.0);
+        let offs = e.stop();
+        assert_eq!(offs.iter().filter(|m| m.bytes == [0x80, 64, 0]).count(), 1, "{offs:?}");
+    }
+
+    #[test]
+    fn live_nodes_are_silent_in_compose_mode() {
+        let mut e = Engine::new();
+        let report = e.set_graph(&live_doc());
+        assert!(report.issues.iter().any(|i| i.node == "m" && i.message.contains("Perform")));
+        e.play(0.0, 1);
+        e.midi_in(0.5, &[0x90, 60, 100]);
+        let sent = run_from(&mut e, 0.0, 1.0);
+        assert!(!sent.iter().any(|(_, b)| b[0] == 0x90), "{sent:?}");
+        // Perform mode also brings the short slice; Compose keeps the usual one.
+        assert_eq!(e.current_slice(), PPQ / 4);
+        e.set_perform(true);
+        assert_eq!(e.current_slice(), LIVE_SLICE);
+        assert!(e.current_lookahead() < e.lookahead);
+    }
+
+    #[test]
+    fn live_cc_drives_a_parameter_while_performing() {
+        let doc = GraphDoc {
+            nodes: vec![
+                node("k", "midi_in_cc", &[("cc", ParamValue::Number(74.0)), ("max", ParamValue::Number(12.0))]),
+                node("t", "transpose", &[]),
+                node("c", "chord", &[("symbol", text("C"))]),
+            ],
+            wires: vec![wire("c", "chord", "t", "chords"), wire("k", "control", "t", "param.semitones")],
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        e.set_graph(&doc);
+        e.set_perform(true);
+        e.midi_in(0.0, &[0xb0, 74, 127]);
+        let preview = e.report().previews.into_iter().find(|p| p.0 == "t").unwrap().1;
+        assert!(preview.starts_with('C'), "a 12-semitone shift is C again: {preview}");
+        e.midi_in(0.0, &[0xb0, 74, 21]);
+        let preview = e.report().previews.into_iter().find(|p| p.0 == "t").unwrap().1;
+        assert!(preview.starts_with('D'), "{preview}");
+    }
+
+    fn take_params(e: &mut Engine) -> Vec<(String, ParamValue)> {
+        let mut captured = e.take_captured();
+        assert_eq!(captured.len(), 1, "{captured:?}");
+        captured.remove(0).params
+    }
+
+    fn press(e: &mut Engine, at: f64, keys: &[u8]) {
+        for &k in keys {
+            e.midi_in(at, &[0x90, k, 100]);
+        }
+    }
+
+    fn release(e: &mut Engine, at: f64, keys: &[u8]) {
+        for &k in keys {
+            e.midi_in(at, &[0x80, k, 0]);
+        }
+    }
+
+    #[test]
+    fn chords_are_captured_into_symbols() {
+        let doc = GraphDoc {
+            nodes: vec![node("c", "chord", &[]), node("p", "progression", &[])],
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        e.set_graph(&doc);
+        assert!(e.arm_capture("c", "octave").is_err());
+        e.arm_capture("c", "symbol").unwrap();
+        press(&mut e, 0.0, &[57, 60, 64, 67]);
+        release(&mut e, 0.1, &[60, 64]);
+        assert!(e.take_captured().is_empty(), "not until every key is up");
+        release(&mut e, 0.1, &[57, 67]);
+        assert_eq!(
+            take_params(&mut e),
+            [("symbol".to_string(), text("Am7")), ("octave".to_string(), ParamValue::Number(3.0))]
+        );
+        assert!(e.capture_status().is_none(), "a chord is captured once");
+
+        // A progression keeps listening, adding a chord each time.
+        e.arm_capture("p", "chords").unwrap();
+        press(&mut e, 1.0, &[62, 65, 69]);
+        release(&mut e, 1.1, &[62, 65, 69]);
+        press(&mut e, 1.2, &[55, 59, 62, 65]);
+        release(&mut e, 1.3, &[55, 59, 62, 65]);
+        let captured = e.take_captured();
+        assert_eq!(captured[1].params[0], ("chords".to_string(), text("Dm G7")));
+        assert_eq!(captured[1].params[1], ("notation".to_string(), text("Chord symbols")));
+        assert_eq!(e.capture_status().unwrap().2, "armed");
+        // Something that isn't a chord says so and keeps waiting.
+        press(&mut e, 1.4, &[60, 61, 62]);
+        release(&mut e, 1.5, &[60, 61, 62]);
+        assert!(e.take_captured().is_empty());
+        assert!(e.capture_status().unwrap().3.unwrap().contains("isn't a chord"));
+        e.finish_capture();
+        assert!(e.capture_status().is_none());
+    }
+
+    #[test]
+    fn notes_played_in_turn_become_degrees_or_a_scale() {
+        let doc = GraphDoc {
+            nodes: vec![
+                node("s", "scale", &[("root", text("D")), ("scale", text("Dorian"))]),
+                node("q", "sequencer", &[]),
+                node("k", "scale", &[]),
+            ],
+            wires: vec![wire("s", "scale", "q", "scale")],
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        e.set_graph(&doc);
+        e.arm_capture("q", "degrees").unwrap();
+        // D4 F4 A4, then C4 below the root; E4 and G4 struck together count once (the top).
+        for (i, k) in [62u8, 65, 69, 60].into_iter().enumerate() {
+            let t = i as f64 * 0.2;
+            press(&mut e, t, &[k]);
+            release(&mut e, t + 0.1, &[k]);
+        }
+        press(&mut e, 1.0, &[64, 67]);
+        e.poll(2.0);
+        assert!(e.take_captured().is_empty(), "still listening");
+        e.poll(3.1);
+        assert_eq!(take_params(&mut e), [("degrees".to_string(), text("1 3 5 -1 4"))]);
+
+        e.arm_capture("k", "scale").unwrap();
+        press(&mut e, 4.0, &[69, 71, 72, 74, 76, 77, 79, 81]);
+        e.finish_capture();
+        assert_eq!(
+            take_params(&mut e),
+            [
+                ("root".to_string(), text("A")),
+                ("scale".to_string(), text("Custom")),
+                ("notes".to_string(), text("A B C D E F G")),
+            ]
+        );
+    }
+
+    #[test]
+    fn recording_takes_one_pass_of_the_loop() {
+        let doc = GraphDoc {
+            nodes: vec![node("r", "recorded", &[("bars", ParamValue::Number(1.0))])],
+            ..Default::default()
+        };
+        let mut e = Engine::new();
+        e.set_graph(&doc);
+        e.set_bpm(0.0, 120.0);
+        e.play(0.0, 1);
+        run_from(&mut e, 0.0, 0.5);
+        // Armed mid-bar, the pass starts at the next bar: tick 3840, 2 s after the start delay.
+        e.arm_capture("r", "notes").unwrap();
+        run_from(&mut e, 0.5, 1.0);
+        assert_eq!(e.capture_status().unwrap().2, "waiting");
+        run_from(&mut e, 1.0, 2.3);
+        assert_eq!(e.capture_status().unwrap().2, "recording");
+        e.midi_in(2.3, &[0x90, 60, 100]); // a quarter in
+        run_from(&mut e, 2.3, 2.8);
+        e.midi_in(2.8, &[0x80, 60, 0]); // a quarter later
+        e.midi_in(3.55, &[0x90, 67, 90]); // held past the end
+        run_from(&mut e, 2.8, 4.2);
+        assert!(e.capture_status().is_none());
+        let params = take_params(&mut e);
+        let ParamValue::Text(notes) = &params[0].1 else { panic!() };
+        let notes = crate::nodes::input::decode_recorded(notes).unwrap();
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        let near = |a: Ticks, b: Ticks| a.abs_diff(b) <= 4;
+        assert!(near(notes[0].0, 480) && near(notes[0].1, 960) && notes[0].2 == 60, "{notes:?}");
+        assert!(near(notes[1].0, 2880) && near(notes[1].1, 960) && notes[1].2 == 67, "{notes:?}");
     }
 }

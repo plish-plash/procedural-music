@@ -9,6 +9,7 @@ use pm_theory::{Chord, Meter, Note, Pitch, Scale, Ticks};
 use pm_synth::{ModuleDesc, ModuleKind, RackDesc};
 
 use crate::json::Json;
+use crate::live::LiveCtx;
 use crate::nodes::{self, Inputs, NodeImpl, Sink};
 use crate::spec::{NodeSpec, ParamSpec, ParamValue, PortType, PARAM_PORT};
 use crate::timeline::Timeline;
@@ -71,7 +72,7 @@ impl GraphDoc {
 
 /// The time window and settings for one evaluation.
 #[derive(Clone, Copy, Debug)]
-pub struct EvalContext {
+pub struct EvalContext<'a> {
     /// Inclusive start tick.
     pub start: Ticks,
     /// Exclusive end tick.
@@ -88,6 +89,8 @@ pub struct EvalContext {
     pub section: u64,
     /// Which time this section name comes round in the arrangement (1 for the first).
     pub repeat: u32,
+    /// The live MIDI input, while performing (live nodes play nothing without it).
+    pub live: Option<LiveCtx<'a>>,
 }
 
 /// A section name as nodes compare it: case and surrounding spaces don't matter.
@@ -102,8 +105,8 @@ pub fn section_key(name: &str) -> u64 {
     k.max(1)
 }
 
-impl EvalContext {
-    /// A live-playback context.
+impl EvalContext<'_> {
+    /// A playback context.
     pub fn new(start: Ticks, end: Ticks, meter: Meter, salt: u64) -> Self {
         EvalContext {
             start,
@@ -114,6 +117,7 @@ impl EvalContext {
             sync: false,
             section: 0,
             repeat: 0,
+            live: None,
         }
     }
 
@@ -226,6 +230,8 @@ pub struct Graph {
     implicit: Vec<(usize, usize)>,
     /// Whether any parameter is automated (previews then go a slice at a time).
     automated: bool,
+    /// Whether any node reads the live MIDI input.
+    live: bool,
 }
 
 /// Which nodes feed `target`, directly or through others.
@@ -362,6 +368,7 @@ impl Graph {
         let automated = nodes
             .iter()
             .any(|n| n.inputs[n.spec.inputs.len()..].iter().any(Option::is_some));
+        let live = nodes.iter().any(|n| nodes::is_live(n.spec.kind));
 
         // Topological order (Kahn). Whatever is left is in a cycle.
         let mut indegree: Vec<usize> = nodes
@@ -416,12 +423,18 @@ impl Graph {
             issues,
             implicit,
             automated,
+            live,
         }
     }
 
     /// Whether any parameter is driven by a Control.
     pub fn is_automated(&self) -> bool {
         self.automated
+    }
+
+    /// Whether any node reads the live MIDI input.
+    pub fn is_live(&self) -> bool {
+        self.live
     }
 
     /// A number parameter of a node as compiled (its default when unset), if it has one.
@@ -748,6 +761,38 @@ impl Graph {
         self.run_preview(ctx, focus).outputs[i][out]
             .take()
             .ok_or_else(|| "no value yet: connect its inputs".into())
+    }
+
+    /// The value arriving at one of a node's inputs (wired, or from the harmonic
+    /// context), as the previews show it.
+    pub fn input_value(
+        &self,
+        node: &str,
+        port: &str,
+        ctx: &EvalContext,
+        focus: Ticks,
+    ) -> Result<Value, String> {
+        let n = self
+            .nodes
+            .iter()
+            .find(|n| n.id == node)
+            .ok_or_else(|| format!("no node '{node}'"))?;
+        let k = n
+            .spec
+            .inputs
+            .iter()
+            .position(|p| p.name == port)
+            .ok_or_else(|| format!("no input '{port}'"))?;
+        let (src, out) = n.inputs[k].ok_or_else(|| format!("connect {port} first"))?;
+        self.run_preview(ctx, focus).outputs[src][out]
+            .take()
+            .and_then(|v| v.convert(n.spec.inputs[k].ty))
+            .ok_or_else(|| format!("nothing on {port} yet"))
+    }
+
+    /// A node's kind, if there is such a node.
+    pub fn node_kind(&self, node: &str) -> Option<&'static str> {
+        self.nodes.iter().find(|n| n.id == node).map(|n| n.spec.kind)
     }
 
     /// Issues plus a short text preview of every node's output, evaluated over the

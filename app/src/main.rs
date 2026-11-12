@@ -7,6 +7,7 @@
 mod audio;
 mod midi;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -18,10 +19,37 @@ use tauri::Manager;
 struct Shared {
     engine: Mutex<Engine>,
     midi: Mutex<midi::Midi>,
-    /// The input being followed for MIDI clock, kept open while set.
-    clock_in: Mutex<Option<midir::MidiInputConnection<()>>>,
+    /// Which inputs are used for what (see [`Shared::connect_inputs`]).
+    routes: Mutex<InputRoutes>,
+    /// Open MIDI inputs by name, one connection each whatever they are used for.
+    inputs: Mutex<HashMap<String, midir::MidiInputConnection<()>>>,
     audio: audio::Audio,
     start: Instant,
+}
+
+/// What the MIDI inputs are used for.
+#[derive(Default)]
+struct InputRoutes {
+    /// The input followed for clock and start/stop.
+    clock: Option<String>,
+    /// The input played into the graph (notes and controllers).
+    notes: Option<NoteInput>,
+}
+
+enum NoteInput {
+    Port(String),
+    /// Every input found.
+    All,
+}
+
+impl InputRoutes {
+    fn plays(&self, port: &str) -> bool {
+        match &self.notes {
+            Some(NoteInput::All) => true,
+            Some(NoteInput::Port(p)) => p == port,
+            None => false,
+        }
+    }
 }
 
 impl Shared {
@@ -44,6 +72,81 @@ impl Shared {
         for msg in engine.take_audio() {
             let _ = self.audio.tx.send(msg);
         }
+    }
+
+    /// Opens the inputs the routes need and closes the rest. A port that can't be
+    /// opened is an error when it was asked for by name.
+    fn connect_inputs(self: &Arc<Self>) -> Result<(), String> {
+        let wanted: Vec<String> = {
+            let routes = self.routes.lock().unwrap();
+            let mut wanted: Vec<String> = match &routes.notes {
+                Some(NoteInput::All) => midi::input_names(),
+                Some(NoteInput::Port(p)) => vec![p.clone()],
+                None => Vec::new(),
+            };
+            wanted.extend(routes.clock.clone());
+            wanted.sort();
+            wanted.dedup();
+            wanted
+        };
+        let mut inputs = self.inputs.lock().unwrap();
+        let stale: Vec<String> = inputs.keys().filter(|k| !wanted.contains(k)).cloned().collect();
+        for name in stale {
+            if let Some(c) = inputs.remove(&name) {
+                c.close();
+            }
+        }
+        let mut error = None;
+        for name in wanted {
+            if inputs.contains_key(&name) {
+                continue;
+            }
+            let s = self.clone();
+            let port = name.clone();
+            match midi::listen(&name, move |bytes| s.on_input(&port, bytes)) {
+                Ok(c) => {
+                    inputs.insert(name, c);
+                }
+                Err(e) => {
+                    let routes = self.routes.lock().unwrap();
+                    let named = routes.clock.as_deref() == Some(name.as_str())
+                        || matches!(&routes.notes, Some(NoteInput::Port(p)) if *p == name);
+                    if named {
+                        error = Some(e);
+                    }
+                }
+            }
+        }
+        error.map_or(Ok(()), Err)
+    }
+
+    /// A message from an input: clock and transport go to the clock follower, notes and
+    /// controllers to the graph, as the routes say.
+    fn on_input(&self, port: &str, bytes: &[u8]) {
+        let Some(&status) = bytes.first() else { return };
+        let (clock, plays) = {
+            let routes = self.routes.lock().unwrap();
+            (routes.clock.as_deref() == Some(port), routes.plays(port))
+        };
+        let now = self.now();
+        let out = {
+            let mut engine = self.engine.lock().unwrap();
+            let out = if matches!(status, 0xf8 | 0xfa | 0xfb | 0xfc) {
+                if !clock {
+                    return;
+                }
+                engine.clock_message(now, status, salt())
+            } else {
+                if !plays {
+                    return;
+                }
+                engine.midi_in(now, bytes);
+                Vec::new()
+            };
+            self.flush_audio(&mut engine);
+            out
+        };
+        self.send(&out);
     }
 }
 
@@ -88,7 +191,7 @@ fn midi_ports(state: tauri::State<'_, Arc<Shared>>) -> Vec<String> {
     midi::port_names()
 }
 
-/// Lists MIDI input ports (for following an external clock).
+/// Lists MIDI input ports (for following an external clock, and for playing in).
 #[tauri::command]
 fn midi_in_ports() -> Vec<String> {
     midi::input_names()
@@ -97,30 +200,30 @@ fn midi_in_ports() -> Vec<String> {
 /// Follows MIDI clock and start/stop from an input port, or stops following with no port.
 #[tauri::command]
 fn set_clock_in(state: tauri::State<'_, Arc<Shared>>, port: Option<String>) -> Result<(), String> {
-    let mut slot = state.clock_in.lock().unwrap();
-    // Close the old port first, so reopening the same one works.
-    if let Some(old) = slot.take() {
-        old.close();
-    }
-    let follow = match port.filter(|p| !p.is_empty()) {
-        None => false,
-        Some(name) => {
-            let s = state.inner().clone();
-            *slot = Some(midi::listen_clock(&name, move |byte| {
-                let now = s.now();
-                let out = {
-                    let mut engine = s.engine.lock().unwrap();
-                    let out = engine.clock_message(now, byte, salt());
-                    s.flush_audio(&mut engine);
-                    out
-                };
-                s.send(&out);
-            })?);
-            true
-        }
+    let port = port.filter(|p| !p.is_empty());
+    let follow = port.is_some();
+    state.routes.lock().unwrap().clock = port;
+    let result = state.inner().connect_inputs();
+    state.engine.lock().unwrap().set_clock_follow(follow && result.is_ok());
+    result
+}
+
+/// Plays notes and controllers from an input port into the graph ("*": every input), or
+/// stops with no port.
+#[tauri::command]
+fn set_midi_in(state: tauri::State<'_, Arc<Shared>>, port: Option<String>) -> Result<(), String> {
+    state.routes.lock().unwrap().notes = match port.as_deref() {
+        None | Some("") => None,
+        Some("*") => Some(NoteInput::All),
+        Some(p) => Some(NoteInput::Port(p.to_string())),
     };
-    state.engine.lock().unwrap().set_clock_follow(follow);
-    Ok(())
+    {
+        // Keys held on the old input would never be released.
+        let mut engine = state.engine.lock().unwrap();
+        engine.release_live(state.now());
+        state.flush_audio(&mut engine);
+    }
+    state.inner().connect_inputs()
 }
 
 /// Saves a project. Without a path, asks where. Returns the path written, or None if cancelled.
@@ -261,7 +364,8 @@ fn main() {
             engine
         }),
         midi: Mutex::new(midi::Midi::default()),
-        clock_in: Mutex::new(None),
+        routes: Mutex::new(InputRoutes::default()),
+        inputs: Mutex::new(HashMap::new()),
         audio: audio::start(start),
         start,
     });
@@ -291,6 +395,7 @@ fn main() {
             midi_ports,
             midi_in_ports,
             set_clock_in,
+            set_midi_in,
             save_project,
             open_project,
             export_wav,

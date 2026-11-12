@@ -127,6 +127,7 @@ pub fn build_arp(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                 pitch: scale.pitch(i as i32, octave),
                 velocity: scale_velocity(onset.velocity, vel),
                 voice: 0,
+                held: 0,
             });
         });
         notes(out)
@@ -188,6 +189,7 @@ pub fn build_sequencer(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                     pitch: scales.at(t).value.pitch(d, octave),
                     velocity: scale_velocity(onset.velocity, vel),
                     voice: 0,
+                    held: 0,
                 });
             }
         });
@@ -258,6 +260,7 @@ pub fn build_random_walk(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                 pitch: scale.pitch(pos, octave),
                 velocity: scale_velocity(onset.velocity, vel),
                 voice: 0,
+                held: 0,
             });
         });
         notes(out)
@@ -283,7 +286,7 @@ fn parse_degrees(text: &str) -> Result<Vec<i32>, String> {
 
 /// A note's degree in the scale counted from the root of `octave` (0 is that root), after
 /// snapping it into the scale.
-fn degree_in(scale: &Scale, pitch: Pitch, octave: i32) -> Option<i32> {
+pub(crate) fn degree_in(scale: &Scale, pitch: Pitch, octave: i32) -> Option<i32> {
     if scale.tuning() != pitch.tuning() || scale.is_empty() {
         return None;
     }
@@ -408,6 +411,7 @@ impl NodeImpl for MarkovNode {
                 pitch: scales.at(t).value.pitch(d, self.octave),
                 velocity: scale_velocity(onset.velocity, self.vel),
                 voice: 0,
+                held: 0,
             });
         });
         notes(out)
@@ -488,6 +492,7 @@ pub fn build_contour(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                 pitch: scales.at(t).value.pitch(d, octave),
                 velocity: scale_velocity(onset.velocity, vel),
                 voice: 0,
+                held: 0,
             });
         });
         notes(out)
@@ -605,6 +610,7 @@ pub fn build_play_chords(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                     pitch,
                     velocity,
                     voice: v as u8,
+                    held: 0,
                 });
             }
         };
@@ -692,6 +698,7 @@ pub fn build_chord_root(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                         pitch,
                         velocity: scale_velocity(onset.velocity, vel),
                         voice: 0,
+                        held: 0,
                     });
                 }
             });
@@ -704,6 +711,7 @@ pub fn build_chord_root(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                         pitch,
                         velocity: scale_velocity(Onset::NORMAL, vel),
                         voice: 0,
+                        held: 0,
                     });
                 }
             }
@@ -780,6 +788,7 @@ pub fn build_drum(p: &Params) -> Result<Box<dyn NodeImpl>, String> {
                 pitch: Pitch::midi(key),
                 velocity: scale_velocity(onset.velocity, vel),
                 voice: 0,
+                held: 0,
             });
         });
         notes(out)
@@ -796,7 +805,7 @@ mod tests {
     use pm_theory::{Meter, PPQ};
     use std::collections::HashMap;
 
-    fn ctx(start: Ticks, end: Ticks, salt: u64) -> EvalContext {
+    fn ctx(start: Ticks, end: Ticks, salt: u64) -> EvalContext<'static> {
         EvalContext::new(start, end, Meter::COMMON, salt)
     }
 
@@ -832,7 +841,7 @@ mod tests {
             pitches
                 .iter()
                 .enumerate()
-                .map(|(i, p)| Note { start: i as Ticks * step, duration: step, pitch: Pitch::parse(p).unwrap(), velocity: 90, voice: 0 })
+                .map(|(i, p)| Note { start: i as Ticks * step, duration: step, pitch: Pitch::parse(p).unwrap(), velocity: 90, voice: 0, held: 0 })
                 .collect(),
         ))
     }

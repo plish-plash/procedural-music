@@ -35,6 +35,14 @@ const AUDIBLE = new Set(['scale', 'chord', 'rhythm']);
 // The pitch-set picker's keys, and how note names map back to pitch classes.
 const PC_LABELS = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'F#', 'G', 'Ab', 'A', 'Bb', 'B'];
 const BLACK_PCS = new Set([1, 3, 6, 8, 10]);
+// What the capture buttons do, by the kind of capture (see `captureButton`).
+const CAPTURE_TITLES = {
+  chord: 'Play a chord on the MIDI input to set it',
+  chords: 'Play chords on the MIDI input, one after another, to set the progression; click again when done',
+  scale: 'Play the notes of a scale on the MIDI input, starting on its root',
+  degrees: 'Play a melody on the MIDI input; it is taken after a two-second pause (or click again)',
+  record: 'Record from the MIDI input: one pass of the loop, starting where it does while playing. Click again to stop.',
+};
 function pcOfName(name) {
   const m = /^([A-Ga-g])([#b♯♭]*)$/.exec(name.trim());
   if (!m) return null;
@@ -112,6 +120,7 @@ export function normalizeDoc(doc) {
     bpm: doc.bpm ?? 110,
     ...(doc.clockPort ? { clockPort: doc.clockPort } : {}),
     ...(doc.clockInPort ? { clockInPort: doc.clockInPort } : {}),
+    ...(doc.noteInPort ? { noteInPort: doc.noteInPort } : {}),
     // A project-wide random lock: every playback uses this seed.
     ...(doc.random?.lock ? { random: { lock: true, seed: Number(doc.random.seed) || 0 } } : {}),
     nodes: normalizeNodes(doc.nodes),
@@ -136,8 +145,11 @@ function uniqueName(list, base) {
 }
 
 export class Editor {
-  constructor({ canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, specs, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect, onCaptureSeed }) {
-    Object.assign(this, { canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect, onCaptureSeed });
+  constructor({ canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, specs, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect, onCaptureSeed, onCapture }) {
+    Object.assign(this, { canvas, world, nodesEl, wiresEl, crumbsEl, addMenu, addSearch, addList, emptyHint, onChange, onLibrarySave, onSectionMode, onAudition, onProbe, onSelect, onCaptureSeed, onCapture });
+    // The capture in progress (see `setCapture`).
+    this.capture = null;
+    this.captureKey = '';
     // The card shown while hovering a wire: what the wire carries.
     this.probe = { el: el('div', { class: 'probe', hidden: '' }), wire: null, timer: null, cache: new Map(), x: 0, y: 0 };
     document.body.append(this.probe.el);
@@ -1161,9 +1173,27 @@ export class Editor {
         update = (v) => this.fillPortSelect(select, v);
         break;
       }
+      case 'data': {
+        // Stored, not typed: recorded notes show how many there are.
+        const count = (v) => String(v ?? '').split(/\s+/).filter(Boolean).length;
+        const summary = el('span', { class: 'data-summary' });
+        const clear = el('button', {
+          class: 'mini', title: 'Clear',
+          onclick: (e) => { e.preventDefault(); set(''); update(''); },
+        }, '×');
+        update = (v) => {
+          const k = count(v);
+          summary.textContent = k ? `${k} note${k === 1 ? '' : 's'}` : 'Nothing recorded';
+          clear.hidden = !k;
+        };
+        update(value);
+        control = el('div', { class: 'data-param' }, summary, clear);
+        break;
+      }
       default:
         control = el('span', {}, String(value));
     }
+    if (p.capture) control = el('div', { class: 'with-capture' }, control, this.captureButton(t.flat, t.name, p.capture));
     const name = el('span', { class: 'pname' }, p.label);
     if (p.target && n.type === 'group') {
       // Exposed controls on a group node: double-click the label to rename it.
@@ -1199,6 +1229,49 @@ export class Editor {
       }, '◆'));
     }
     return label;
+  }
+
+  // ---- Playing settings in from the MIDI input ------------------------------------
+
+  /** The 🎹 (or ⏺ for a recording) button that sets a parameter from what is played. */
+  captureButton(flat, name, kind) {
+    const record = kind === 'record';
+    const b = el('button', {
+      class: 'mini capture-btn',
+      dataset: { capture: `${flat}|${name}` },
+      title: CAPTURE_TITLES[kind] ?? 'Set from the MIDI input',
+      onclick: (e) => { e.preventDefault(); e.stopPropagation(); this.onCapture?.(flat, name); },
+    }, record ? '⏺' : '🎹');
+    this.showCaptureOn(b);
+    return b;
+  }
+
+  /** Marks the button of the capture in progress (`{ node, param, state }` or null). */
+  setCapture(capture) {
+    const key = capture ? `${capture.node}|${capture.param}|${capture.state}` : '';
+    if (key === this.captureKey) return;
+    this.captureKey = key;
+    this.capture = capture;
+    for (const b of document.querySelectorAll('.capture-btn')) this.showCaptureOn(b);
+  }
+
+  showCaptureOn(b) {
+    const c = this.capture;
+    const on = !!c && b.dataset.capture === `${c.node}|${c.param}`;
+    b.classList.toggle('on', on);
+    b.classList.toggle('waiting', on && c.state === 'waiting');
+  }
+
+  /** Sets parameters of the node at path `flat` (in the focused section when editing one). */
+  applyCapture(flat, params) {
+    let g = this.doc;
+    const ids = flat.split('/');
+    for (const id of ids.slice(0, -1)) g = g.nodes.find((n) => n.id === id && n.type === 'group')?.graph;
+    const owner = g?.nodes.find((n) => n.id === ids.at(-1));
+    if (!owner) return;
+    for (const [name, value] of Object.entries(params)) this.setParam(owner, flat, name, value);
+    // Other settings may show or hide with these (a Custom scale's notes).
+    this.renderAll();
   }
 
   fillPortSelect(select, value) {

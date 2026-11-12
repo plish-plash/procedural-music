@@ -26,7 +26,14 @@ export async function midiPorts() {
   return post('/api/midi_ports');
 }
 
-/** MIDI input ports, for following an external clock (none outside the app). */
+/** Plays notes and controllers from an input port ('*': every input), or stops with `null`. */
+export async function setMidiIn(port) {
+  if (tauri) return tauri.invoke('set_midi_in', { port: port || null });
+  if (port) throw new Error('MIDI input needs the desktop app');
+  return null;
+}
+
+/** MIDI input ports, for following an external clock or playing in (none outside the app). */
 export async function midiInPorts() {
   if (tauri) return tauri.invoke('midi_in_ports');
   return [];

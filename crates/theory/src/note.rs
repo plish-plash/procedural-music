@@ -14,6 +14,9 @@ pub struct Note {
     pub velocity: u8,
     /// Which voice of a part produced it (used to split counterpoint voices to channels).
     pub voice: u8,
+    /// Nonzero while the key that played it is still held on a live input: the note
+    /// lasts until that key is released, whatever `duration` says.
+    pub held: u16,
 }
 
 impl Note {

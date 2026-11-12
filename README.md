@@ -31,8 +31,9 @@ ahead of the playhead, so you can rewire and retune while the music plays.
 - **Theory views.** Circle of fifths, Tonnetz and interval matrix nodes follow the
   harmony as it plays.
 - **Sound and MIDI.** Built-in poly, mono and drum synths with effects, or MIDI out per
-  part, with CC, clock in and out, and latency compensation. Export to WAV or a
-  standard MIDI file.
+  part, with CC, clock in and out, and latency compensation. Play chords, scales and
+  melodies in from a keyboard, record parts, or play live in Perform mode. Export to WAV
+  or a standard MIDI file.
 
 The design and its reasoning are in [DESIGN.md](DESIGN.md).
 
@@ -111,8 +112,8 @@ The examples play through the built-in instruments on your default audio output.
 | **Notes** | *Octave*, *Quantize to scale*, *Velocity* (with a curve), *Humanize* (small random timing and loudness), *Legato* (hold each note to the next), *Note delay* (with echoes), *Note filter*, *Rhythm gate* (and/or/xor/drop notes with a rhythm's hits, like Combine, or replace their rhythm), *Split by range*, *Repeat bars* (loop the first bars of every block into a riff), *Merge* and *Split voices*. *Harmonizer* adds a parallel third or sixth in the key. |
 | **Analysis** (follow the harmony as it plays; unwired, they show the Harmonic context) | *Circle of fifths* (the key on the rim, the chord as a shape, the path of the roots), *Tonnetz* (the chord's triads on the grid of fifths and thirds) and *Interval matrix* (every interval in the chord, and its interval-class vector). |
 
-Parts (*Play chords*, *Chord root*, *Drum hit*), control, structure, sound and output
-nodes are covered in the sections below; every node explains itself in the inspector.
+Parts (*Play chords*, *Chord root*, *Drum hit*), control, structure, MIDI input, sound
+and output nodes are covered in the sections below; every node explains itself in the inspector.
 
 ### Randomness
 
@@ -188,7 +189,8 @@ notes below. Each section has a name, a length in bars and, optionally, its own 
 
 **Perform** (top right) hides the timeline and shows a button per section. Click one (or
 press 1–9) to jump to it at the next bar line; it then loops until you cue another.
-Parameter edits wait for the bar line, and controls shown on groups get bigger.
+Parameter edits wait for the bar line, and controls shown on groups get bigger. Perform
+mode also plays the live MIDI input nodes (see below).
 
 ### Counterpoint
 
@@ -223,9 +225,33 @@ The **MIDI ▾** menu holds the rest of the MIDI setup:
 - **Clock out** sends MIDI clock and start/stop to a port.
 - **Clock in** follows another device's clock: its tempo and Start/Continue/Stop drive
   playback (the BPM box shows the incoming tempo while following).
+- **MIDI in** picks the keyboard or controller to play in from (or every input). It can
+  be the same port as Clock in.
+- **Live lookahead** is how far ahead the engine works in Perform mode: shorter hears
+  what you play sooner, longer gives heavy patches more room if they stutter. The menu
+  shows the resulting delay. It's saved on this computer.
 - **Latency** shifts everything sent to a port by some milliseconds, so external synths
   line up with the built-in sound. It's saved on this computer, not in the project.
 - **Refresh ports** looks for newly connected devices.
+
+### Playing in from a MIDI keyboard
+
+With a **MIDI in** port chosen, there are three ways to bring in what you play:
+
+- **🎹 buttons** next to some settings set them by playing: hold a chord to set a
+  **Chord**, play chords one after another into a **Progression** (click 🎹 again when
+  done), or play a scale (from its root) or a melody into a **Scale**, **Degree
+  sequencer** or **Markov** node; notes played in turn are taken after a two-second
+  pause. Degrees are counted in the scale reaching the node. It's an ordinary edit, so
+  it's saved and can be undone.
+- **Recorded notes** loops a part you played. Press its ⏺ and play: recording starts
+  where its loop does (at once if you arm it before pressing Play) and lasts one pass.
+  Quantize and Transpose apply as it plays, so the recording itself is kept as played.
+- **MIDI in** and **MIDI CC in** play live, in Perform mode only. MIDI in outputs your
+  notes, and a Chord of the keys you hold (feed it to an Arpeggiator); MIDI CC in turns a
+  knob into a Control for any pinned setting. Notes sound a little after you play them
+  (the live lookahead plus a 1/32 beat), or on the next Quantize step. Live input isn't
+  exported; record a part to keep it.
 
 **File ▾ › Export** renders the song through the built-in instruments to a WAV file
 (faster than real time), or writes a standard MIDI file with one track per part (named

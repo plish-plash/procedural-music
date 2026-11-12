@@ -66,6 +66,7 @@ pub fn notes(value: &Value, meter: Meter) -> Result<Vec<(u64, Note)>, String> {
         pitch,
         velocity,
         voice: 0,
+        held: 0,
     };
     let mut out = Vec::new();
     match value {

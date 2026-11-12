@@ -113,6 +113,54 @@ pub enum ParamKind {
     PitchSet {
         default: &'static str,
     },
+    /// Text the node stores but the inspector doesn't edit as text (recorded notes).
+    Data,
+}
+
+/// Settings that can be set by playing them on the MIDI input: (node kind, setting,
+/// what is captured). See [`Capture`].
+static CAPTURES: &[(&str, &str, Capture)] = &[
+    ("chord", "symbol", Capture::Chord),
+    ("progression", "chords", Capture::Chords),
+    ("scale", "scale", Capture::Scale),
+    ("sequencer", "degrees", Capture::Degrees),
+    ("markov", "degrees", Capture::Degrees),
+    ("recorded", "notes", Capture::Record),
+];
+
+/// What playing on the MIDI input sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capture {
+    /// A chord symbol (and octave) from the keys held together.
+    Chord,
+    /// Chord symbols, one more for each chord played.
+    Chords,
+    /// A custom scale from the notes played, rooted on the first.
+    Scale,
+    /// Scale degrees of the notes played, in turn.
+    Degrees,
+    /// One pass of the node's loop, recorded while playing.
+    Record,
+}
+
+impl Capture {
+    pub fn name(self) -> &'static str {
+        match self {
+            Capture::Chord => "chord",
+            Capture::Chords => "chords",
+            Capture::Scale => "scale",
+            Capture::Degrees => "degrees",
+            Capture::Record => "record",
+        }
+    }
+}
+
+/// What playing on the MIDI input sets for `param` of `node`, if it can.
+pub fn capture(node: &str, param: &str) -> Option<Capture> {
+    CAPTURES
+        .iter()
+        .find(|(k, p, _)| *k == node && *p == param)
+        .map(|&(_, _, c)| c)
 }
 
 /// Settings shown only while another setting of the same node has one of some values:
@@ -163,7 +211,10 @@ impl ParamSpec {
     pub fn automatable(&self, node: &NodeSpec) -> bool {
         matches!(self.kind, ParamKind::Number { .. } | ParamKind::LogNumber { .. })
             && self.name != "seed"
-            && !matches!(node.kind, "counterpoint" | "piano_roll" | "midi_out" | "midi_cc")
+            && !matches!(
+                node.kind,
+                "counterpoint" | "piano_roll" | "midi_out" | "midi_cc" | "midi_in_cc" | "recorded"
+            )
     }
 
     /// `value` snapped to this parameter's grid (its step, or three significant figures
@@ -193,7 +244,7 @@ impl ParamSpec {
             }
             ParamKind::Choice { default, .. } => ParamValue::Text(default.to_string()),
             ParamKind::Bool { default } => ParamValue::Bool(default),
-            ParamKind::MidiPort => ParamValue::Text(String::new()),
+            ParamKind::MidiPort | ParamKind::Data => ParamValue::Text(String::new()),
         }
     }
 }
@@ -242,7 +293,7 @@ impl<'a> Params<'a> {
             (Some(v @ ParamValue::Number(_)), _) => v.clone(),
             (
                 Some(v @ ParamValue::Text(_)),
-                ParamKind::Text { .. } | ParamKind::MidiPort | ParamKind::PitchSet { .. },
+                ParamKind::Text { .. } | ParamKind::MidiPort | ParamKind::PitchSet { .. } | ParamKind::Data,
             ) => {
                 v.clone()
             }

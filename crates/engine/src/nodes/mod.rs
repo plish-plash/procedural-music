@@ -3,6 +3,7 @@
 mod analysis;
 mod control;
 mod counterpoint;
+pub(crate) mod input;
 mod melody;
 mod note_ops;
 mod output;
@@ -18,6 +19,7 @@ use pm_theory::{Chord, Note, Rhythm, Scale, Ticks, PPQ};
 use pm_synth::ModuleKind;
 
 pub use counterpoint::solve_generation;
+pub(crate) use melody::degree_in;
 
 use crate::graph::EvalContext;
 use crate::spec::{NodeSpec, ParamValue, Params};
@@ -215,6 +217,10 @@ static SPECS: &[&NodeSpec] = &[
     &structure::SELECT_RHYTHM,
     &structure::SELECT_CHORD,
     &structure::SELECT_SCALE,
+    // MIDI input
+    &input::RECORDED,
+    &input::MIDI_IN,
+    &input::MIDI_IN_CC,
     // Built-in sound
     &sound::POLY_SYNTH,
     &sound::MONO_SYNTH,
@@ -238,6 +244,11 @@ pub fn specs() -> &'static [&'static NodeSpec] {
 
 pub fn spec_for(kind: &str) -> Option<&'static NodeSpec> {
     SPECS.iter().copied().find(|s| s.kind == kind)
+}
+
+/// Whether nodes of this kind read the live MIDI input.
+pub fn is_live(kind: &str) -> bool {
+    matches!(kind, "midi_in" | "midi_in_cc")
 }
 
 /// Builds a node from its kind and parameter values.
@@ -308,6 +319,9 @@ pub fn build(
         "select_notes" | "select_rhythm" | "select_chord" | "select_scale" => {
             structure::build_select(&p)
         }
+        "recorded" => input::build_recorded(&p),
+        "midi_in" => input::build_midi_in(&p),
+        "midi_in_cc" => input::build_midi_in_cc(&p),
         "midi_out" => output::build_midi_out(&p),
         "midi_cc" => output::build_midi_cc(&p),
         "poly_synth" | "mono_synth" | "drum_synth" | "mixer" | "fx_filter" | "fx_drive"
